@@ -1,0 +1,7 @@
+<resources>
+    <style name="Theme.MyCarArabety" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#141D2B</item>
+        <item name="android:statusBarColor">#141D2B</item>
+        <item name="android:navigationBarColor">#141D2B</item>
+    </style>
+</resources>

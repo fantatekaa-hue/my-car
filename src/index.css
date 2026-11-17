@@ -1,0 +1,210 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --bg-canvas: #141D2B;
+    --bg-surface: #1C2738;
+    --bg-elevated: #25344A;
+    --border-subtle: #33445C;
+    --accent-crimson: #E62E3D;
+    --accent-crimson-hover: #D41C2B;
+    --text-primary: #F8FAFC;
+    --text-secondary: #9FB0C7;
+    color-scheme: dark;
+  }
+
+  html[data-theme='light'] {
+    --bg-canvas: #F3F7FC;
+    --bg-surface: #FFFFFF;
+    --bg-elevated: #EAF1FA;
+    --border-subtle: #D7E2F0;
+    --text-primary: #0F172A;
+    --text-secondary: #475569;
+    color-scheme: light;
+  }
+
+  html,
+  body,
+  #root,
+  main {
+    overflow-anchor: none;
+  }
+
+  html,
+  body {
+    background-color: var(--bg-canvas);
+    color: var(--text-primary);
+    font-family: 'Cairo', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    -webkit-font-smoothing: antialiased;
+    transition: background-color 0.2s ease, color 0.2s ease;
+  }
+}
+
+.font-mono-nums {
+  font-family: 'Space Grotesk', 'Cairo', system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Custom subtle scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg-canvas);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-subtle);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #64748B;
+}
+
+/* Lighter, brighter Midnight Cobalt tones even when Dark Mode is chosen */
+html[data-theme='dark'] .bg-\[\#0D1015\] {
+  background-color: #141D2B;
+}
+html[data-theme='dark'] .bg-\[\#0D1015\]\/95 {
+  background-color: rgba(20, 29, 43, 0.94);
+}
+html[data-theme='dark'] .bg-\[\#171C24\] {
+  background-color: #1C2738;
+  box-shadow: 0 2px 10px rgba(8, 15, 28, 0.25);
+}
+html[data-theme='dark'] .bg-\[\#1D232E\] {
+  background-color: #25344A;
+}
+html[data-theme='dark'] .border-\[\#262E3B\] {
+  border-color: #33445C;
+}
+
+/* Bright, airy Daylight Mode semantic theme overrides */
+html[data-theme='light'] .bg-\[\#0D1015\] {
+  background-color: #F3F7FC;
+}
+html[data-theme='light'] .bg-\[\#0D1015\]\/95 {
+  background-color: rgba(243, 247, 252, 0.94);
+}
+html[data-theme='light'] .bg-\[\#171C24\] {
+  background-color: #FFFFFF;
+  box-shadow: 0 2px 10px rgba(15, 23, 42, 0.05);
+}
+html[data-theme='light'] .bg-\[\#1D232E\] {
+  background-color: #EAF1FA;
+}
+html[data-theme='light'] .bg-\[\#262E3B\] {
+  background-color: #E2EAF4;
+}
+html[data-theme='light'] .hover\:bg-\[\#1D232E\]:hover {
+  background-color: #E2EAF4;
+}
+html[data-theme='light'] .border-\[\#262E3B\] {
+  border-color: #D7E2F0;
+}
+html[data-theme='light'] .border-\[\#262E3B\]\/60 {
+  border-color: rgba(215, 226, 240, 0.85);
+}
+
+html[data-theme='light'] .text-white,
+html[data-theme='light'] .text-\[\#F8FAFC\] {
+  color: #0F172A;
+}
+html[data-theme='light'] .hover\:text-white:hover {
+  color: #0F172A;
+}
+html[data-theme='light'] .text-slate-200 {
+  color: #1E293B;
+}
+html[data-theme='light'] .text-slate-300 {
+  color: #334155;
+}
+html[data-theme='light'] .text-slate-400 {
+  color: #475569;
+}
+html[data-theme='light'] .text-slate-400\/75 {
+  color: rgba(71, 85, 105, 0.85);
+}
+html[data-theme='light'] .text-slate-500 {
+  color: #64748B;
+}
+html[data-theme='light'] .text-slate-600 {
+  color: #94A3B8;
+}
+
+/* High-contrast status text in Light Mode */
+html[data-theme='light'] .text-amber-200,
+html[data-theme='light'] .text-amber-200\/90,
+html[data-theme='light'] .text-amber-300,
+html[data-theme='light'] .text-amber-400 {
+  color: #B45309;
+}
+html[data-theme='light'] .text-emerald-300,
+html[data-theme='light'] .text-emerald-400 {
+  color: #047857;
+}
+html[data-theme='light'] .text-red-200,
+html[data-theme='light'] .text-red-300,
+html[data-theme='light'] .text-red-400 {
+  color: #B91C1C;
+}
+html[data-theme='light'] .text-sky-400 {
+  color: #0369A1;
+}
+
+/* Preserve crisp white text & icons inside solid accent buttons & highlighted Engine Oil tile */
+html[data-theme='light'] .bg-\[\#E11D2E\],
+html[data-theme='light'] .bg-\[\#E11D2E\] *:not(.tile-badge):not(.tile-badge *),
+html[data-theme='light'] .bg-\[\#E11D2E\]:hover,
+html[data-theme='light'] .bg-red-600,
+html[data-theme='light'] .bg-red-600 *,
+html[data-theme='light'] .bg-emerald-500,
+html[data-theme='light'] .bg-emerald-500 *,
+html[data-theme='light'] .bg-emerald-600,
+html[data-theme='light'] .bg-emerald-600 *,
+html[data-theme='light'] .bg-gradient-to-b,
+html[data-theme='light'] .bg-gradient-to-b *:not(.tile-badge):not(.tile-badge *) {
+  color: #FFFFFF;
+}
+html[data-theme='light'] .bg-gradient-to-b .text-white\/85 {
+  color: rgba(255, 255, 255, 0.92);
+}
+html[data-theme='light'] .bg-amber-500,
+html[data-theme='light'] .bg-amber-500 * {
+  color: #0F172A;
+}
+html[data-theme='light'] .tile-badge-red {
+  background-color: #DC2626;
+  color: #FFFFFF;
+}
+html[data-theme='light'] .tile-badge-highlight-red {
+  background-color: #FFFFFF;
+  color: #E11D2E;
+}
+html[data-theme='light'] .tile-badge-yellow {
+  background-color: #F59E0B;
+  color: #0F172A;
+}
+
+/* Recharts crisp bold typography & Light/Dark mode contrast */
+.recharts-cartesian-axis-tick-value,
+.recharts-text {
+  font-family: 'Space Grotesk', 'Cairo', system-ui, sans-serif;
+  font-weight: 700;
+  fill: #9FB0C7;
+}
+html[data-theme='light'] .recharts-cartesian-axis-tick-value,
+html[data-theme='light'] .recharts-text {
+  fill: #475569;
+}
+html[data-theme='light'] .recharts-cartesian-grid line {
+  stroke: #E2EAF4;
+}
+
+
+

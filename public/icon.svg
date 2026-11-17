@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect width="512" height="512" rx="96" fill="#0D1015"/>
+  <rect x="32" y="32" width="448" height="448" rx="76" fill="#171C24" stroke="#262E3B" stroke-width="6"/>
+  <path d="M116 144 L168 144 L138 228 L86 228 Z" fill="#E11D2E"/>
+  <path d="M188 144 L240 144 L210 228 L158 228 Z" fill="#E11D2E"/>
+  <text x="256" y="348" text-anchor="middle" font-family="sans-serif" font-weight="700" font-size="112" fill="#F8FAFC" letter-spacing="4">MY CAR</text>
+  <text x="256" y="416" text-anchor="middle" font-family="sans-serif" font-weight="600" font-size="56" fill="#94A3B8">عربيتي</text>
+</svg>

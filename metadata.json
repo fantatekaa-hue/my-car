@@ -1,0 +1,6 @@
+{
+  "name": "عربيتي | MY CAR",
+  "description": "نظام إدارة السيارات الشخصية دون اتصال بالإنترنت — المصروفات، الوقود، الصيانة، الأعطال، الإطارات، التراخيص والتنبيهات.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

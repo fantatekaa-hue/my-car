@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>عربيتي | MY CAR</title>
+    <meta name="description" content="نظام إدارة السيارات الشخصية دون اتصال بالإنترنت — المصروفات، الوقود، الصيانة، الأعطال، الإطارات، التراخيص والتنبيهات." />
+    <meta property="og:title" content="عربيتي | MY CAR" />
+    <meta property="og:description" content="نظام إدارة السيارات الشخصية دون اتصال بالإنترنت — المصروفات، الوقود، الصيانة، الأعطال، الإطارات، التراخيص والتنبيهات." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="theme-color" content="#F3F7FC" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="عربيتي" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&family=Space+Grotesk:wght@600;700&display=swap" rel="stylesheet" />
+    <script>
+      (function () {
+        try {
+          var t = localStorage.getItem('mycar_theme');
+          var resolved = 'light';
+          if (t === 'dark' || t === 'light') {
+            resolved = t;
+          } else if (t === 'system' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+            resolved = 'dark';
+          }
+          document.documentElement.dataset.theme = resolved;
+          var m = document.querySelector('meta[name="theme-color"]');
+          if (m) m.setAttribute('content', resolved === 'light' ? '#F3F7FC' : '#141D2B');
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+
