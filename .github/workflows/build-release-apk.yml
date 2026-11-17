@@ -21,6 +21,14 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
+      - name: Accept Android SDK licenses and ensure SDK 35
+        run: |
+          SDKM=$(command -v sdkmanager || echo "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager")
+          if [ -x "$SDKM" ]; then
+            (yes || true) | "$SDKM" --licenses >/dev/null 2>&1 || true
+            "$SDKM" "platforms;android-35" "build-tools;35.0.0" >/dev/null || true
+          fi
+
       - name: Detect Android project directory
         id: detect
         run: |

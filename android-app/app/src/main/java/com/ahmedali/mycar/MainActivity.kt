@@ -1167,7 +1167,7 @@ fun VehiclesScreen(
                                         formError = "يرجى تحديد حالة الكوريك ومفتاح العجل والمنفاخ الكهربائي."
                                         return@Button
                                     }
-                                    if (!tiresVaryLater && (tireBrand.isBlank() || tireSize.isBlank() || tireDotWeek.toIntOrNull() !in 1..53 || (tireDotYear.toIntOrNull() ?: 0) !in 2000..2100)) {
+                                    if (!tiresVaryLater && (tireBrand.isBlank() || tireSize.isBlank() || (tireDotWeek.toIntOrNull() ?: 0) !in 1..53 || (tireDotYear.toIntOrNull() ?: 0) !in 2000..2100)) {
                                         formError = "يرجى إدخال بيانات الإطارات (الماركة، المقاس، أسبوع وسنة DOT) أو اختيار إدخال كل إطار لاحقًا."
                                         return@Button
                                     }

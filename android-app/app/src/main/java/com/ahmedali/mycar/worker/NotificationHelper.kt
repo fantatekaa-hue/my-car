@@ -1,6 +1,7 @@
 package com.ahmedali.mycar.worker
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -37,6 +38,7 @@ object NotificationHelper {
         }
     }
 
+    @SuppressLint("MissingPermission")
     fun sendRedAlertNotification(context: Context, alertId: String, title: String, message: String) {
         if (!hasNotificationPermission(context)) return
         ensureChannel(context)
