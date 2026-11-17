@@ -1,6 +1,7 @@
 package com.ahmedali.mycar
 
 import android.Manifest
+import android.app.DatePickerDialog
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -25,6 +26,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -34,19 +36,32 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.ahmedali.mycar.data.VehicleBundle
+import com.ahmedali.mycar.data.db.CustomCatalogEntity
 import com.ahmedali.mycar.data.db.DocumentRecordEntity
 import com.ahmedali.mycar.data.db.EmergencyEquipmentEntity
 import com.ahmedali.mycar.data.db.FaultRecordEntity
@@ -56,6 +71,7 @@ import com.ahmedali.mycar.data.db.SparePartEntity
 import com.ahmedali.mycar.data.db.TireRecordEntity
 import com.ahmedali.mycar.data.db.VehicleEntity
 import com.ahmedali.mycar.domain.EgyptianCarCatalog
+import com.ahmedali.mycar.domain.EgyptianPlateValidator
 import com.ahmedali.mycar.domain.FuelCalculator
 import com.ahmedali.mycar.domain.UnitConverter
 import com.ahmedali.mycar.ui.theme.*
@@ -65,7 +81,9 @@ import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
+import java.time.LocalTime
 import java.time.YearMonth
+import java.util.Calendar
 import java.util.UUID
 import kotlin.math.roundToInt
 
@@ -175,6 +193,11 @@ fun MyCarAppRoot(
     val vehicles by repo.observeVehicles().collectAsState(initial = emptyList())
     var activeVehicleId by remember { mutableStateOf<String?>(null) }
     var bundle by remember { mutableStateOf<VehicleBundle?>(null) }
+    var customCatalog by remember { mutableStateOf<List<CustomCatalogEntity>>(emptyList()) }
+    var currencyCode by remember { mutableStateOf("EGP") }
+    var currencySymbol by remember { mutableStateOf("ج.م") }
+    var pendingEditVehicleId by remember { mutableStateOf<String?>(null) }
+    var pendingOpenCreateVehicle by remember { mutableStateOf(false) }
     var statusMessage by remember { mutableStateOf<String?>(null) }
     var hasNotifPermission by remember { mutableStateOf(NotificationHelper.hasNotificationPermission(context)) }
 
@@ -184,6 +207,9 @@ fun MyCarAppRoot(
 
     suspend fun refreshActiveBundle() {
         val settings = repo.getSettings()
+        currencyCode = settings.currencyCode
+        currencySymbol = settings.currencySymbol
+        customCatalog = repo.getCustomCatalog()
         val chosen = vehicles.firstOrNull { it.id == settings.activeVehicleId && !it.isArchived }
             ?: vehicles.firstOrNull { !it.isArchived }
         activeVehicleId = chosen?.id
@@ -191,7 +217,7 @@ fun MyCarAppRoot(
     }
 
     LaunchedEffect(Unit) {
-        delay(900)
+        delay(650)
         refreshActiveBundle()
         currentScreen = ScreenRoute.HOME
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !hasNotifPermission) {
@@ -217,6 +243,21 @@ fun MyCarAppRoot(
         return
     }
 
+    val navRedCounts = remember(bundle) {
+        val map = mutableMapOf<String, Int>()
+        bundle?.reminders?.filter { it.severity == "RED" }?.forEach { rem ->
+            map[rem.targetSection] = (map[rem.targetSection] ?: 0) + 1
+        }
+        map
+    }
+    val navYellowCounts = remember(bundle) {
+        val map = mutableMapOf<String, Int>()
+        bundle?.reminders?.filter { it.severity == "YELLOW" }?.forEach { rem ->
+            map[rem.targetSection] = (map[rem.targetSection] ?: 0) + 1
+        }
+        map
+    }
+
     Scaffold(
         containerColor = ObsidianCanvas,
         snackbarHost = {
@@ -227,6 +268,67 @@ fun MyCarAppRoot(
                     contentColor = TextPrimary,
                     action = { TextButton(onClick = { statusMessage = null }) { Text("إغلاق", color = CrimsonAccent) } }
                 ) { Text(msg) }
+            }
+        },
+        bottomBar = {
+            NavigationBar(
+                containerColor = GraphiteSurface,
+                tonalElevation = 4.dp
+            ) {
+                val navItems = listOf(
+                    Triple(ScreenRoute.HOME, "الرئيسية", Icons.Filled.Home),
+                    Triple(ScreenRoute.ENGINE_OIL, "زيت المحرك", Icons.Filled.WaterDrop),
+                    Triple(ScreenRoute.FUEL, "الوقود", Icons.Filled.LocalGasStation),
+                    Triple(ScreenRoute.MAINTENANCE, "الصيانة", Icons.Filled.Build),
+                    Triple(ScreenRoute.BACKUP, "المزيد", Icons.Filled.Settings)
+                )
+                navItems.forEach { (route, label, icon) ->
+                    val selected = currentScreen == route
+                    val sectionKey = when (route) {
+                        ScreenRoute.ENGINE_OIL -> "engine_oil"
+                        ScreenRoute.FUEL -> "fuel"
+                        ScreenRoute.MAINTENANCE -> "maintenance"
+                        else -> ""
+                    }
+                    val alertTotal = (navRedCounts[sectionKey] ?: 0) + (navYellowCounts[sectionKey] ?: 0)
+                    val hasRed = (navRedCounts[sectionKey] ?: 0) > 0
+                    NavigationBarItem(
+                        selected = selected,
+                        onClick = {
+                            val needsVeh = route !in listOf(ScreenRoute.HOME, ScreenRoute.VEHICLES, ScreenRoute.BACKUP, ScreenRoute.ABOUT)
+                            if (bundle == null && needsVeh) {
+                                statusMessage = "يرجى إضافة سيارة أولاً"
+                                pendingOpenCreateVehicle = true
+                                pendingEditVehicleId = null
+                                currentScreen = ScreenRoute.VEHICLES
+                            } else {
+                                currentScreen = route
+                            }
+                        },
+                        icon = {
+                            Box {
+                                Icon(icon, contentDescription = label)
+                                if (alertTotal > 0) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(8.dp)
+                                            .clip(CircleShape)
+                                            .background(if (hasRed) AlertRed else AlertYellow)
+                                            .align(Alignment.TopEnd)
+                                    )
+                                }
+                            }
+                        },
+                        label = { Text(label, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        colors = NavigationBarItemDefaults.colors(
+                            selectedIconColor = CrimsonAccent,
+                            selectedTextColor = CrimsonAccent,
+                            indicatorColor = CrimsonAccent.copy(alpha = 0.14f),
+                            unselectedIconColor = TextSecondary,
+                            unselectedTextColor = TextSecondary
+                        )
+                    )
+                }
             }
         }
     ) { padding ->
@@ -252,13 +354,15 @@ fun MyCarAppRoot(
                             ScreenRoute.TIRES -> "الإطارات وتجهيزات الطوارئ"
                             ScreenRoute.DOCUMENTS -> "الأوراق والتراخيص"
                             ScreenRoute.REPORTS -> "تقرير السيارة"
-                            ScreenRoute.BACKUP -> "النسخ الاحتياطي والاستعادة"
+                            ScreenRoute.BACKUP -> "النسخ الاحتياطي والإعدادات"
                             ScreenRoute.ABOUT -> "حول التطبيق"
                             else -> "عربيتي | MY CAR"
                         },
                         color = TextPrimary,
-                        fontSize = 18.sp,
+                        fontSize = 17.sp,
                         fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f)
                     )
                     ThemeModeMenuButton(
@@ -283,12 +387,28 @@ fun MyCarAppRoot(
                         }
                         context.startActivity(intent)
                     },
+                    onAddNewVehicle = {
+                        pendingEditVehicleId = null
+                        pendingOpenCreateVehicle = true
+                        currentScreen = ScreenRoute.VEHICLES
+                    },
+                    onEditActiveVehicle = { vId ->
+                        pendingOpenCreateVehicle = false
+                        pendingEditVehicleId = vId
+                        currentScreen = ScreenRoute.VEHICLES
+                    },
                     onNavigate = { route ->
                         val needsVehicle = route !in listOf(ScreenRoute.VEHICLES, ScreenRoute.BACKUP, ScreenRoute.ABOUT)
                         if (bundle == null && needsVehicle) {
                             statusMessage = "يرجى إضافة سيارة أولاً"
+                            pendingEditVehicleId = null
+                            pendingOpenCreateVehicle = true
                             currentScreen = ScreenRoute.VEHICLES
                         } else {
+                            if (route == ScreenRoute.VEHICLES) {
+                                pendingEditVehicleId = null
+                                pendingOpenCreateVehicle = false
+                            }
                             currentScreen = route
                         }
                     },
@@ -309,6 +429,13 @@ fun MyCarAppRoot(
                 ScreenRoute.VEHICLES -> VehiclesScreen(
                     vehicles = vehicles,
                     activeId = activeVehicleId,
+                    customCatalog = customCatalog,
+                    initialEditVehicleId = pendingEditVehicleId,
+                    initialOpenCreate = pendingOpenCreateVehicle,
+                    onClearInitialFlags = {
+                        pendingEditVehicleId = null
+                        pendingOpenCreateVehicle = false
+                    },
                     onSelect = { id ->
                         scope.launch {
                             repo.setActiveVehicle(id)
@@ -317,9 +444,12 @@ fun MyCarAppRoot(
                             currentScreen = ScreenRoute.HOME
                         }
                     },
-                    onCreate = { brand, model, year, plate, unit, odoDisplay, ownership, poaDone, licExp, inspExp, drvExp, hasJack, hasLugWrench, hasAirPump, tireBrand, tireSize, tireDotWeek, tireDotYear ->
+                    onCreate = { brand, model, year, plate, unit, odoDisplay, ownership, poaDone, licExp, inspExp, drvExp, hasJack, hasLugWrench, hasAirPump, tireBrand, tireSize, tireDotWeek, tireDotYear, saveToCatalog ->
                         scope.launch {
                             try {
+                                if (saveToCatalog) {
+                                    repo.saveCustomCatalogEntry(brand, model, year)
+                                }
                                 val km = odoDisplay?.let { UnitConverter.toInternalKm(it, unit) }
                                 val created = repo.createVehicle(
                                     brand = brand,
@@ -350,6 +480,31 @@ fun MyCarAppRoot(
                                 statusMessage = e.message
                             }
                         }
+                    },
+                    onUpdate = { updated ->
+                        scope.launch {
+                            try {
+                                repo.updateVehicle(updated)
+                                refreshActiveBundle()
+                                statusMessage = "تم حفظ تعديلات السيارة"
+                            } catch (e: Exception) {
+                                statusMessage = e.message
+                            }
+                        }
+                    },
+                    onArchive = { vId, archived ->
+                        scope.launch {
+                            repo.archiveVehicle(vId, archived)
+                            refreshActiveBundle()
+                            statusMessage = if (archived) "تمت أرشفة السيارة" else "تم استرجاع السيارة من الأرشيف"
+                        }
+                    },
+                    onDeletePermanently = { vId ->
+                        scope.launch {
+                            repo.deleteVehiclePermanently(vId)
+                            refreshActiveBundle()
+                            statusMessage = "تم حذف السيارة وجميع سجلاتها نهائيًا"
+                        }
                     }
                 )
                 ScreenRoute.ODOMETER -> OdometerScreen(
@@ -375,13 +530,14 @@ fun MyCarAppRoot(
                 )
                 ScreenRoute.FUEL -> FuelScreen(
                     bundle = bundle,
-                    onAddFuel = { fuelType, liters, totalEgp, odoDisplay, fillType ->
+                    currencySymbol = currencySymbol,
+                    onAddFuel = { fuelType, liters, totalEgp, odoDisplay, fillType, dt ->
                         scope.launch {
                             val v = bundle?.vehicle ?: return@launch
                             try {
                                 repo.saveFuelEntry(
                                     v.id,
-                                    LocalDateTime.now().toString().take(16),
+                                    dt,
                                     UnitConverter.toInternalKm(odoDisplay, v.odometerUnit),
                                     fuelType,
                                     liters,
@@ -396,6 +552,7 @@ fun MyCarAppRoot(
                 )
                 ScreenRoute.ENGINE_OIL -> EngineOilScreen(
                     bundle = bundle,
+                    currencySymbol = currencySymbol,
                     onSaveOil = { date, odoDisplay, brand, visc, intervalKmInput, costEgp, filterChanged, filterCostEgp, source, mech ->
                         scope.launch {
                             val v = bundle?.vehicle ?: return@launch
@@ -431,11 +588,25 @@ fun MyCarAppRoot(
                 )
                 ScreenRoute.MAINTENANCE -> MaintenanceScreen(
                     bundle = bundle,
-                    onSaveMaintenance = { typeId, typeCode, customName, date, odoDisplay, brand, intervalDisplay, costEgp, source, mech ->
+                    currencySymbol = currencySymbol,
+                    onAddCustomType = { name, desc ->
+                        scope.launch {
+                            val v = bundle?.vehicle ?: return@launch
+                            try {
+                                repo.addCustomMaintenanceType(v.id, name, desc)
+                                refreshActiveBundle()
+                                statusMessage = "تمت إضافة البند المخصص: $name"
+                            } catch (e: Exception) { statusMessage = e.message }
+                        }
+                    },
+                    onSaveMaintenance = { typeId, typeCode, customName, date, odoDisplay, brand, intervalDisplay, costEgp, source, mech, conditionStatus, beltKind, warrantyMonths ->
                         scope.launch {
                             val v = bundle?.vehicle ?: return@launch
                             val odoKm = UnitConverter.toInternalKm(odoDisplay, v.odometerUnit)
                             val intervalKm = intervalDisplay?.let { UnitConverter.toInternalKm(it, v.odometerUnit) }
+                            val warrantyExpiry = if (typeCode == "BATTERY" && warrantyMonths != null && warrantyMonths > 0) {
+                                try { LocalDate.parse(date).plusMonths(warrantyMonths.toLong()).toString() } catch (_: Exception) { null }
+                            } else null
                             val rec = MaintenanceRecordEntity(
                                 id = "maint_${UUID.randomUUID()}",
                                 vehicleId = v.id,
@@ -449,6 +620,10 @@ fun MyCarAppRoot(
                                 intervalKm = intervalKm,
                                 nextDueKm = intervalKm?.let { odoKm + it },
                                 scheduleSource = source,
+                                beltKind = beltKind?.ifBlank { null },
+                                conditionStatus = conditionStatus,
+                                warrantyMonths = warrantyMonths,
+                                warrantyExpiryDate = warrantyExpiry,
                                 mechanicOrCenter = mech.ifBlank { null },
                                 createdAt = java.time.Instant.now().toString()
                             )
@@ -460,6 +635,7 @@ fun MyCarAppRoot(
                 )
                 ScreenRoute.FAULTS -> FaultsAndTasksScreen(
                     bundle = bundle,
+                    currencySymbol = currencySymbol,
                     onAddTask = { issue, desc, urgent ->
                         scope.launch {
                             val v = bundle?.vehicle ?: return@launch
@@ -514,6 +690,7 @@ fun MyCarAppRoot(
                 )
                 ScreenRoute.EXPENSES -> ExpensesScreen(
                     bundle = bundle,
+                    currencySymbol = currencySymbol,
                     onAddAdditional = { cat, date, amountEgp, notes ->
                         scope.launch {
                             val v = bundle?.vehicle ?: return@launch
@@ -525,6 +702,7 @@ fun MyCarAppRoot(
                 )
                 ScreenRoute.PARTS -> SparePartsScreen(
                     bundle = bundle,
+                    currencySymbol = currencySymbol,
                     onAddPart = { name, brand, priceEgp, vendor, includedInParent ->
                         scope.launch {
                             val v = bundle?.vehicle ?: return@launch
@@ -585,8 +763,32 @@ fun MyCarAppRoot(
                         }
                     }
                 )
-                ScreenRoute.REPORTS -> ReportsScreen(bundle = bundle)
+                ScreenRoute.REPORTS -> ReportsScreen(bundle = bundle, currencySymbol = currencySymbol)
                 ScreenRoute.BACKUP -> BackupScreen(
+                    hasVehicle = bundle != null,
+                    currencyCode = currencyCode,
+                    currencySymbol = currencySymbol,
+                    themeMode = themeMode,
+                    systemIsDark = systemIsDark,
+                    onSelectThemeMode = onSelectThemeMode,
+                    onUpdateCurrency = { code, sym ->
+                        scope.launch {
+                            repo.updateCurrencySettings(code, sym)
+                            refreshActiveBundle()
+                            statusMessage = "تم تحديث العملة إلى $sym ($code)"
+                        }
+                    },
+                    onNavigate = { route ->
+                        val needsVeh = route !in listOf(ScreenRoute.VEHICLES, ScreenRoute.BACKUP, ScreenRoute.ABOUT)
+                        if (bundle == null && needsVeh) {
+                            statusMessage = "يرجى إضافة سيارة أولاً"
+                            pendingEditVehicleId = null
+                            pendingOpenCreateVehicle = true
+                            currentScreen = ScreenRoute.VEHICLES
+                        } else {
+                            currentScreen = route
+                        }
+                    },
                     onExport = { uri ->
                         scope.launch {
                             val jsonStr = repo.exportBackupJson()
@@ -643,6 +845,8 @@ fun HomeScreen(
     systemIsDark: Boolean,
     onSelectThemeMode: (String) -> Unit,
     onOpenNotifSettings: () -> Unit,
+    onAddNewVehicle: () -> Unit,
+    onEditActiveVehicle: (String) -> Unit,
     onNavigate: (ScreenRoute) -> Unit,
     onQuickOdometerUpdate: (Double) -> Unit
 ) {
@@ -703,7 +907,7 @@ fun HomeScreen(
                     )
                     if (vehicles.isEmpty()) {
                         Button(
-                            onClick = { onNavigate(ScreenRoute.VEHICLES) },
+                            onClick = onAddNewVehicle,
                             colors = ButtonDefaults.buttonColors(containerColor = CrimsonAccent),
                             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
                         ) {
@@ -713,7 +917,7 @@ fun HomeScreen(
                         }
                     } else {
                         FilledTonalIconButton(
-                            onClick = { onNavigate(ScreenRoute.VEHICLES) },
+                            onClick = onAddNewVehicle,
                             modifier = Modifier.size(34.dp),
                             colors = IconButtonDefaults.filledTonalIconButtonColors(containerColor = GraphiteSurface)
                         ) {
@@ -752,7 +956,33 @@ fun HomeScreen(
             }
         }
 
-        if (bundle != null) {
+        if (bundle == null) {
+            item {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = GraphiteSurface),
+                    border = BorderStroke(1.dp, SubtleBorder),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(16.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("لم يتم إضافة سيارة بعد", fontWeight = FontWeight.Bold, color = TextPrimary, fontSize = 15.sp)
+                            Text("اضغط «إضافة سيارة» للبدء بإدخال سيارتك الأولى.", color = TextSecondary, fontSize = 12.sp)
+                        }
+                        Spacer(Modifier.width(10.dp))
+                        Button(
+                            onClick = onAddNewVehicle,
+                            colors = ButtonDefaults.buttonColors(containerColor = CrimsonAccent)
+                        ) {
+                            Text("إضافة الآن", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        }
+                    }
+                }
+            }
+        } else {
             val v = bundle.vehicle
             val hasOdo = v.hasOdometerReading
             val displayOdo = UnitConverter.fromInternalKm(v.currentOdometerKm, v.odometerUnit)
@@ -763,8 +993,36 @@ fun HomeScreen(
                     shape = RoundedCornerShape(16.dp)
                 ) {
                     Column(modifier = Modifier.padding(16.dp)) {
-                        Text("${v.brand} ${v.model} (${v.year})", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
-                        Text("اللوحة: ${v.plateNormalized}", fontSize = 13.sp, color = TextSecondary)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.Top
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("${v.brand} ${v.model} (${v.year})", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
+                                Text(
+                                    "لوحة: ${v.plateNormalized} · ${if (v.ownershipType == "POWER_OF_ATTORNEY") "توكيل" else "عقد مسجل"} · ${v.odometerUnit}",
+                                    fontSize = 12.sp,
+                                    color = TextSecondary
+                                )
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                OutlinedButton(
+                                    onClick = { onEditActiveVehicle(v.id) },
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                    modifier = Modifier.height(34.dp)
+                                ) {
+                                    Text("تعديل", fontSize = 11.sp, color = TextPrimary)
+                                }
+                                OutlinedButton(
+                                    onClick = { onNavigate(ScreenRoute.VEHICLES) },
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                    modifier = Modifier.height(34.dp)
+                                ) {
+                                    Text("تبديل", fontSize = 11.sp, color = CrimsonAccent)
+                                }
+                            }
+                        }
                         Spacer(Modifier.height(12.dp))
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -799,17 +1057,18 @@ fun HomeScreen(
             item {
                 Card(
                     colors = CardDefaults.cardColors(containerColor = GraphiteSurface),
-                    border = BorderStroke(1.dp, if (redCount > 0) AlertRed else SubtleBorder)
+                    border = BorderStroke(1.dp, if (redCount > 0) AlertRed else SubtleBorder),
+                    shape = RoundedCornerShape(16.dp)
                 ) {
-                    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text("ملخص تنبيهات السيارة ($redCount عاجل · $yellowCount قريب)", fontWeight = FontWeight.Bold, color = TextPrimary, fontSize = 14.sp)
-                        bundle.reminders.take(3).forEach { rem ->
+                        bundle.reminders.take(4).forEach { rem ->
                             val badgeColor = when (rem.severity) {
                                 "RED" -> AlertRed
                                 "YELLOW" -> AlertYellow
                                 else -> AlertGreen
                             }
-                            Row(
+                            Card(
                                 modifier = Modifier.fillMaxWidth().clickable {
                                     when (rem.targetSection) {
                                         "documents" -> onNavigate(ScreenRoute.DOCUMENTS)
@@ -819,11 +1078,19 @@ fun HomeScreen(
                                         else -> onNavigate(ScreenRoute.MAINTENANCE)
                                     }
                                 },
-                                verticalAlignment = Alignment.CenterVertically
+                                colors = CardDefaults.cardColors(containerColor = badgeColor.copy(alpha = 0.08f)),
+                                border = BorderStroke(1.dp, badgeColor.copy(alpha = 0.4f))
                             ) {
-                                Icon(Icons.Filled.Circle, contentDescription = null, tint = badgeColor, modifier = Modifier.size(10.dp))
-                                Spacer(Modifier.width(8.dp))
-                                Text(rem.title, color = TextPrimary, fontSize = 13.sp)
+                                Column(modifier = Modifier.fillMaxWidth().padding(10.dp)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(Icons.Filled.Circle, contentDescription = null, tint = badgeColor, modifier = Modifier.size(9.dp))
+                                        Spacer(Modifier.width(8.dp))
+                                        Text(rem.title, color = TextPrimary, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                                    }
+                                    if (rem.message.isNotBlank()) {
+                                        Text(rem.message, color = TextSecondary, fontSize = 11.sp)
+                                    }
+                                }
                             }
                         }
                     }
@@ -963,17 +1230,230 @@ fun HomeScreen(
 }
 
 @Composable
+fun CatalogDropdownField(
+    label: String,
+    selectedValue: String,
+    options: List<String>,
+    isLtr: Boolean = true,
+    modifier: Modifier = Modifier,
+    onSelect: (String) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box(modifier = modifier) {
+        Column {
+            Text(label, color = TextSecondary, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(4.dp))
+            OutlinedCard(
+                modifier = Modifier.fillMaxWidth().clickable { expanded = true },
+                colors = CardDefaults.outlinedCardColors(containerColor = ObsidianCanvas),
+                border = BorderStroke(1.dp, SubtleBorder),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    CompositionLocalProvider(
+                        LocalLayoutDirection provides if (isLtr) LayoutDirection.Ltr else LayoutDirection.Rtl
+                    ) {
+                        Text(
+                            text = selectedValue.ifBlank { "اختر..." },
+                            color = TextPrimary,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    Icon(Icons.Filled.ArrowDropDown, contentDescription = null, tint = CrimsonAccent)
+                }
+            }
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier = Modifier.background(GraphiteSurface).heightIn(max = 320.dp)
+        ) {
+            options.forEach { option ->
+                DropdownMenuItem(
+                    text = {
+                        CompositionLocalProvider(
+                            LocalLayoutDirection provides if (isLtr) LayoutDirection.Ltr else LayoutDirection.Rtl
+                        ) {
+                            Text(
+                                text = option,
+                                color = if (option == selectedValue) CrimsonAccent else TextPrimary,
+                                fontWeight = if (option == selectedValue) FontWeight.Bold else FontWeight.Normal,
+                                fontSize = 13.sp
+                            )
+                        }
+                    },
+                    onClick = {
+                        expanded = false
+                        onSelect(option)
+                    }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun DatePickerField(
+    label: String,
+    dateIso: String,
+    modifier: Modifier = Modifier,
+    onDateSelected: (String) -> Unit
+) {
+    val context = LocalContext.current
+    Column(modifier = modifier) {
+        Text(label, color = TextSecondary, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(4.dp))
+        OutlinedCard(
+            modifier = Modifier.fillMaxWidth().clickable {
+                val parsed = try { LocalDate.parse(dateIso.take(10)) } catch (_: Exception) { LocalDate.now() }
+                DatePickerDialog(
+                    context,
+                    { _, y, m, d ->
+                        val picked = LocalDate.of(y, m + 1, d).toString()
+                        onDateSelected(picked)
+                    },
+                    parsed.year,
+                    parsed.monthValue - 1,
+                    parsed.dayOfMonth
+                ).show()
+            },
+            colors = CardDefaults.outlinedCardColors(containerColor = ObsidianCanvas),
+            border = BorderStroke(1.dp, SubtleBorder),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(dateIso, color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                Icon(Icons.Filled.DateRange, contentDescription = null, tint = CrimsonAccent, modifier = Modifier.size(18.dp))
+            }
+        }
+    }
+}
+
+private fun splitPlateForSlots(plateRaw: String): Pair<List<String>, List<String>> {
+    val arabicMap = mapOf('٠' to '0', '١' to '1', '٢' to '2', '٣' to '3', '٤' to '4', '٥' to '5', '٦' to '6', '٧' to '7', '٨' to '8', '٩' to '9')
+    val clean = plateRaw.replace(Regex("[\\s\\-\\u0640]+"), "").map { arabicMap[it] ?: it }.joinToString("")
+    val letters = clean.filter { !it.isDigit() }.take(3).map { it.toString() }
+    val digits = clean.filter { it.isDigit() }.take(4).map { it.toString() }
+    return listOf(
+        letters.getOrElse(0) { "" },
+        letters.getOrElse(1) { "" },
+        letters.getOrElse(2) { "" }
+    ) to listOf(
+        digits.getOrElse(0) { "" },
+        digits.getOrElse(1) { "" },
+        digits.getOrElse(2) { "" },
+        digits.getOrElse(3) { "" }
+    )
+}
+
+@Composable
+fun PlateSlotBox(
+    value: String,
+    placeholder: String,
+    isDigit: Boolean,
+    imeAction: ImeAction,
+    focusRequester: FocusRequester,
+    onValueChange: (String) -> Unit,
+    onBackspaceEmpty: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var focused by remember { mutableStateOf(false) }
+    Surface(
+        modifier = modifier.height(46.dp),
+        shape = RoundedCornerShape(10.dp),
+        color = GraphiteSurface,
+        border = BorderStroke(
+            width = if (focused) 1.5.dp else 1.dp,
+            color = if (focused) CrimsonAccent else SubtleBorder
+        )
+    ) {
+        Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize().padding(horizontal = 2.dp)) {
+            BasicTextField(
+                value = value,
+                onValueChange = onValueChange,
+                singleLine = true,
+                cursorBrush = SolidColor(CrimsonAccent),
+                textStyle = TextStyle(
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center,
+                    color = TextPrimary
+                ),
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = if (isDigit) KeyboardType.Number else KeyboardType.Text,
+                    imeAction = imeAction
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .focusRequester(focusRequester)
+                    .onFocusChanged { focused = it.isFocused }
+                    .onPreviewKeyEvent { ev ->
+                        if (ev.type == KeyEventType.KeyDown && ev.key == Key.Backspace && value.isEmpty()) {
+                            onBackspaceEmpty()
+                            true
+                        } else false
+                    },
+                decorationBox = { inner ->
+                    Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxWidth()) {
+                        if (value.isEmpty()) {
+                            Text(
+                                text = placeholder,
+                                color = TextSecondary.copy(alpha = 0.45f),
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                        inner()
+                    }
+                }
+            )
+        }
+    }
+}
+
+@Composable
 fun VehiclesScreen(
     vehicles: List<VehicleEntity>,
     activeId: String?,
+    customCatalog: List<CustomCatalogEntity>,
+    initialEditVehicleId: String?,
+    initialOpenCreate: Boolean,
+    onClearInitialFlags: () -> Unit,
     onSelect: (String) -> Unit,
-    onCreate: (String, String, Int, String, String, Double?, String, Boolean, String, String, String, Boolean?, Boolean?, Boolean?, String, String, Int?, Int?) -> Unit
+    onCreate: (String, String, Int, String, String, Double?, String, Boolean, String, String, String, Boolean?, Boolean?, Boolean?, String, String, Int?, Int?, Boolean) -> Unit,
+    onUpdate: (VehicleEntity) -> Unit,
+    onArchive: (String, Boolean) -> Unit,
+    onDeletePermanently: (String) -> Unit
 ) {
-    var brand by remember { mutableStateOf(EgyptianCarCatalog.defaults.first().brand) }
-    var model by remember { mutableStateOf(EgyptianCarCatalog.defaults.first().models.first().name) }
-    var year by remember { mutableStateOf("2023") }
+    val catalog = remember(customCatalog) { EgyptianCarCatalog.mergeWithCustom(customCatalog) }
+    val activeVehicles = remember(vehicles) { vehicles.filter { !it.isArchived } }
+    val archivedVehicles = remember(vehicles) { vehicles.filter { it.isArchived } }
 
-    // 3 letter boxes + 4 digit boxes
+    var showWizard by remember { mutableStateOf(activeVehicles.isEmpty() || initialOpenCreate || initialEditVehicleId != null) }
+    var editingVehicle by remember { mutableStateOf<VehicleEntity?>(null) }
+    var showArchived by remember { mutableStateOf(false) }
+    var confirmDeleteVehicle by remember { mutableStateOf<VehicleEntity?>(null) }
+
+    var manualMode by remember { mutableStateOf(false) }
+    var saveToCatalog by remember { mutableStateOf(true) }
+    var brand by remember { mutableStateOf(catalog.firstOrNull()?.brand ?: "Hyundai") }
+    var model by remember { mutableStateOf(catalog.firstOrNull()?.models?.firstOrNull()?.name ?: "Elantra CN7") }
+    var year by remember { mutableStateOf((catalog.firstOrNull()?.models?.firstOrNull()?.years?.firstOrNull() ?: 2025).toString()) }
+
+    // 3 letter boxes + 4 digit boxes with FocusRequester auto-advance
     var l0 by remember { mutableStateOf("") }
     var l1 by remember { mutableStateOf("") }
     var l2 by remember { mutableStateOf("") }
@@ -982,8 +1462,11 @@ fun VehiclesScreen(
     var d2 by remember { mutableStateOf("") }
     var d3 by remember { mutableStateOf("") }
 
+    val letterFocus = remember { List(3) { FocusRequester() } }
+    val digitFocus = remember { List(4) { FocusRequester() } }
+
     var unit by remember { mutableStateOf("KM") }
-    var odometer by remember { mutableStateOf("") } // Optional!
+    var odometer by remember { mutableStateOf("") }
     var ownership by remember { mutableStateOf("REGISTERED_CONTRACT") }
     var poaDone by remember { mutableStateOf(false) }
 
@@ -992,12 +1475,10 @@ fun VehiclesScreen(
     var inspYear by remember { mutableStateOf((defaultLicDate.year + 1).toString()) }
     var drvExpiry by remember { mutableStateOf(defaultLicDate.plusYears(2).toString()) }
 
-    // Explicit non-assumed emergency equipment
     var hasJack by remember { mutableStateOf<Boolean?>(null) }
     var hasLugWrench by remember { mutableStateOf<Boolean?>(null) }
     var hasAirPump by remember { mutableStateOf<Boolean?>(null) }
 
-    // Explicit non-assumed tires
     var tiresVaryLater by remember { mutableStateOf(false) }
     var tireBrand by remember { mutableStateOf("") }
     var tireSize by remember { mutableStateOf("") }
@@ -1005,198 +1486,589 @@ fun VehiclesScreen(
     var tireDotYear by remember { mutableStateOf("") }
     var formError by remember { mutableStateOf<String?>(null) }
     var wizardStep by remember { mutableStateOf(1) }
-    val stepTitles = listOf("السيارة واللوحة", "العداد والملكية", "التراخيص والفحص", "الطوارئ والإطارات")
 
-    LazyColumn(modifier = Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        items(vehicles) { v ->
-            Card(
-                modifier = Modifier.fillMaxWidth().clickable { onSelect(v.id) },
-                colors = CardDefaults.cardColors(containerColor = GraphiteSurface),
-                border = BorderStroke(1.dp, if (v.id == activeId) CrimsonAccent else SubtleBorder)
+    val listState = rememberLazyListState()
+
+    fun openAddWizard() {
+        editingVehicle = null
+        manualMode = false
+        val firstB = catalog.firstOrNull()
+        val firstM = firstB?.models?.firstOrNull()
+        brand = firstB?.brand ?: "Hyundai"
+        model = firstM?.name ?: "Elantra CN7"
+        year = (firstM?.years?.firstOrNull() ?: 2025).toString()
+        l0 = ""; l1 = ""; l2 = ""; d0 = ""; d1 = ""; d2 = ""; d3 = ""
+        unit = "KM"; odometer = ""; ownership = "REGISTERED_CONTRACT"; poaDone = false
+        hasJack = null; hasLugWrench = null; hasAirPump = null
+        tiresVaryLater = false; tireBrand = ""; tireSize = ""; tireDotWeek = ""; tireDotYear = ""
+        formError = null
+        wizardStep = 1
+        showWizard = true
+    }
+
+    fun openEditWizard(v: VehicleEntity) {
+        editingVehicle = v
+        val bMatch = catalog.find { it.brand == v.brand }
+        val mMatch = bMatch?.models?.find { it.name == v.model }
+        manualMode = !(bMatch != null && mMatch != null && v.year in mMatch.years)
+        brand = v.brand
+        model = v.model
+        year = v.year.toString()
+        val (lSlots, dSlots) = splitPlateForSlots(v.plateRaw)
+        l0 = lSlots[0]; l1 = lSlots[1]; l2 = lSlots[2]
+        d0 = dSlots[0]; d1 = dSlots[1]; d2 = dSlots[2]; d3 = dSlots[3]
+        unit = v.odometerUnit
+        ownership = v.ownershipType
+        poaDone = v.poaRegisteredContractDone
+        formError = null
+        wizardStep = 1
+        showWizard = true
+    }
+
+    LaunchedEffect(initialEditVehicleId, initialOpenCreate, vehicles) {
+        if (initialEditVehicleId != null) {
+            vehicles.find { it.id == initialEditVehicleId }?.let { openEditWizard(it) }
+            onClearInitialFlags()
+        } else if (initialOpenCreate) {
+            openAddWizard()
+            onClearInitialFlags()
+        }
+    }
+
+    LaunchedEffect(showWizard, wizardStep) {
+        if (showWizard) listState.scrollToItem(0)
+    }
+
+    val selectedBrandObj = catalog.find { it.brand == brand }
+    val availableModels = selectedBrandObj?.models ?: emptyList()
+    val selectedModelObj = availableModels.find { it.name == model }
+    val availableYears = selectedModelObj?.years ?: emptyList()
+
+    val maxStep = if (editingVehicle != null) 2 else 4
+    val stepTitles = if (editingVehicle != null) {
+        listOf("السيارة واللوحة", "الوحدة والملكية")
+    } else {
+        listOf("السيارة واللوحة", "العداد والملكية", "التراخيص والفحص", "الطوارئ والإطارات")
+    }
+
+    val composedPlate = "${(l0 + l1 + l2).trim()} ${(d0 + d1 + d2 + d3).trim()}".trim()
+    val plateCheck = EgyptianPlateValidator.validate(composedPlate)
+
+    LazyColumn(
+        state = listState,
+        modifier = Modifier.fillMaxSize().padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        item {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(modifier = Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Filled.DirectionsCar, contentDescription = null, tint = CrimsonAccent, modifier = Modifier.size(32.dp))
-                    Spacer(Modifier.width(12.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("${v.brand} ${v.model} (${v.year})", fontWeight = FontWeight.Bold, color = TextPrimary)
-                        Text("اللوحة: ${v.plateNormalized}", color = TextSecondary, fontSize = 12.sp)
+                Button(
+                    onClick = { if (showWizard && editingVehicle == null) showWizard = false else openAddWizard() },
+                    colors = ButtonDefaults.buttonColors(containerColor = CrimsonAccent)
+                ) {
+                    Icon(if (showWizard && editingVehicle == null) Icons.Filled.Close else Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(if (showWizard && editingVehicle == null) "إغلاق النموذج" else "إضافة سيارة جديدة", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                }
+                if (archivedVehicles.isNotEmpty()) {
+                    OutlinedButton(onClick = { showArchived = !showArchived }) {
+                        Text(if (showArchived) "إخفاء المؤرشفة" else "المؤرشفة (${archivedVehicles.size})", color = TextPrimary, fontSize = 11.sp)
                     }
-                    if (v.id == activeId) Text("النشطة", color = CrimsonAccent, fontWeight = FontWeight.Bold)
                 }
             }
         }
-        item {
-            Card(colors = CardDefaults.cardColors(containerColor = GraphiteSurface), border = BorderStroke(1.dp, SubtleBorder)) {
-                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("إضافة سيارة جديدة — الخطوة $wizardStep من 4 (${stepTitles[wizardStep - 1]})", fontWeight = FontWeight.Bold, color = TextPrimary, fontSize = 15.sp)
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
-                        stepTitles.forEachIndexed { idx, label ->
-                            val sNum = idx + 1
-                            FilterChip(
-                                selected = wizardStep == sNum,
-                                onClick = { if (sNum <= wizardStep) { formError = null; wizardStep = sNum } },
-                                label = { Text("$sNum", fontSize = 11.sp) },
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
-                    }
 
-                    if (wizardStep == 1) {
-                        OutlinedTextField(value = brand, onValueChange = { brand = it }, label = { Text("الماركة (Brand)") }, modifier = Modifier.fillMaxWidth())
-                        OutlinedTextField(value = model, onValueChange = { model = it }, label = { Text("الموديل (Model)") }, modifier = Modifier.fillMaxWidth())
-                        OutlinedTextField(value = year, onValueChange = { year = it }, label = { Text("سنة الصنع") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
-
-                        Text("رقم اللوحة", color = TextSecondary, fontSize = 12.sp)
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
-                            listOf(
-                                l0 to { s: String -> l0 = s.take(1) },
-                                l1 to { s: String -> l1 = s.take(1) },
-                                l2 to { s: String -> l2 = s.take(1) }
-                            ).forEach { (v, setter) ->
-                                OutlinedTextField(
-                                    value = v,
-                                    onValueChange = setter,
-                                    singleLine = true,
-                                    modifier = Modifier.weight(1f)
-                                )
-                            }
-                            listOf(
-                                d0 to { s: String -> d0 = s.take(1) },
-                                d1 to { s: String -> d1 = s.take(1) },
-                                d2 to { s: String -> d2 = s.take(1) },
-                                d3 to { s: String -> d3 = s.take(1) }
-                            ).forEach { (v, setter) ->
-                                OutlinedTextField(
-                                    value = v,
-                                    onValueChange = setter,
-                                    singleLine = true,
-                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                    modifier = Modifier.weight(1f)
-                                )
-                            }
-                        }
-                    } else if (wizardStep == 2) {
-                        OutlinedTextField(
-                            value = odometer,
-                            onValueChange = { odometer = it },
-                            label = { Text("قراءة العداد الحالية (اختياري الآن)") },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            modifier = Modifier.fillMaxWidth()
+        if (showWizard) {
+            item {
+                Card(colors = CardDefaults.cardColors(containerColor = GraphiteSurface), border = BorderStroke(1.dp, SubtleBorder), shape = RoundedCornerShape(16.dp)) {
+                    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text(
+                            if (editingVehicle != null) "تعديل: ${editingVehicle!!.brand} ${editingVehicle!!.model} — الخطوة $wizardStep من $maxStep"
+                            else "إضافة سيارة جديدة — الخطوة $wizardStep من $maxStep (${stepTitles[wizardStep - 1]})",
+                            fontWeight = FontWeight.Bold,
+                            color = TextPrimary,
+                            fontSize = 15.sp
                         )
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            FilterChip(selected = unit == "KM", onClick = { unit = "KM" }, label = { Text("KM") })
-                            FilterChip(selected = unit == "MILE", onClick = { unit = "MILE" }, label = { Text("Mile") })
-                            FilterChip(selected = ownership == "REGISTERED_CONTRACT", onClick = { ownership = "REGISTERED_CONTRACT" }, label = { Text("عقد مسجل") })
-                            FilterChip(selected = ownership == "POWER_OF_ATTORNEY", onClick = { ownership = "POWER_OF_ATTORNEY" }, label = { Text("توكيل") })
-                        }
-                        if (ownership == "POWER_OF_ATTORNEY") {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Checkbox(checked = poaDone, onCheckedChange = { poaDone = it })
-                                Text("تم عمل عقد مسجل؟", color = TextPrimary)
+
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                            stepTitles.forEachIndexed { idx, label ->
+                                val sNum = idx + 1
+                                FilterChip(
+                                    selected = wizardStep == sNum,
+                                    onClick = { if (sNum <= wizardStep) { formError = null; wizardStep = sNum } },
+                                    label = { Text("0$sNum · $label", fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                    modifier = Modifier.weight(1f)
+                                )
                             }
                         }
-                    } else if (wizardStep == 3) {
-                        OutlinedTextField(value = licExpiry, onValueChange = { licExpiry = it }, label = { Text("تاريخ انتهاء ترخيص السيارة (YYYY-MM-DD)") }, modifier = Modifier.fillMaxWidth())
-                        OutlinedTextField(value = inspYear, onValueChange = { inspYear = it.take(4) }, label = { Text("سنة الفحص الفني") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
-                        OutlinedTextField(value = drvExpiry, onValueChange = { drvExpiry = it }, label = { Text("تاريخ انتهاء رخصة القيادة الشخصية (YYYY-MM-DD)") }, modifier = Modifier.fillMaxWidth())
-                    } else if (wizardStep == 4) {
-                        Text("تجهيزات الطوارئ", fontWeight = FontWeight.Bold, color = TextPrimary, fontSize = 13.sp)
-                        listOf(
-                            Triple("الكوريك", hasJack) { v: Boolean -> hasJack = v },
-                            Triple("مفتاح العجل", hasLugWrench) { v: Boolean -> hasLugWrench = v },
-                            Triple("منفاخ كهربائي", hasAirPump) { v: Boolean -> hasAirPump = v }
-                        ).forEach { (label, current, setter) ->
-                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                                Text(label, color = TextPrimary, fontSize = 13.sp)
-                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    FilterChip(selected = current == true, onClick = { setter(true) }, label = { Text("متوفر") })
-                                    FilterChip(selected = current == false, onClick = { setter(false) }, label = { Text("غير متوفر") })
+
+                        if (wizardStep == 1) {
+                            // Automatic Catalog vs Manual toggle
+                            Row(
+                                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(ObsidianCanvas).padding(10.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    if (manualMode) "إدخال يدوي حر" else "قاعدة السوق المصري (محلية)",
+                                    color = TextSecondary,
+                                    fontSize = 11.sp
+                                )
+                                TextButton(onClick = { manualMode = !manualMode }) {
+                                    Text(
+                                        if (manualMode) "العودة لقائمة السوق المصري" else "إضافة ماركة/موديل يدويًا",
+                                        color = CrimsonAccent,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 11.sp
+                                    )
+                                }
+                            }
+
+                            if (!manualMode) {
+                                CatalogDropdownField(
+                                    label = "الماركة (Brand)",
+                                    selectedValue = brand,
+                                    options = catalog.map { it.brand },
+                                    isLtr = true,
+                                    onSelect = { newBrand ->
+                                        brand = newBrand
+                                        val bObj = catalog.find { it.brand == newBrand }
+                                        val firstM = bObj?.models?.firstOrNull()
+                                        if (firstM != null) {
+                                            model = firstM.name
+                                            year = (firstM.years.firstOrNull() ?: 2025).toString()
+                                        }
+                                    }
+                                )
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                                    CatalogDropdownField(
+                                        label = "الموديل (Model)",
+                                        selectedValue = model,
+                                        options = availableModels.map { it.name },
+                                        isLtr = true,
+                                        modifier = Modifier.weight(1.4f),
+                                        onSelect = { newModel ->
+                                            model = newModel
+                                            val mObj = availableModels.find { it.name == newModel }
+                                            mObj?.years?.firstOrNull()?.let { year = it.toString() }
+                                        }
+                                    )
+                                    CatalogDropdownField(
+                                        label = "سنة الصنع",
+                                        selectedValue = year,
+                                        options = availableYears.map { it.toString() },
+                                        isLtr = true,
+                                        modifier = Modifier.weight(1f),
+                                        onSelect = { year = it }
+                                    )
+                                }
+                            } else {
+                                OutlinedTextField(value = brand, onValueChange = { brand = it }, label = { Text("الماركة (Brand)") }, modifier = Modifier.fillMaxWidth())
+                                OutlinedTextField(value = model, onValueChange = { model = it }, label = { Text("الموديل (Model)") }, modifier = Modifier.fillMaxWidth())
+                                OutlinedTextField(value = year, onValueChange = { year = it }, label = { Text("سنة الصنع") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
+                                if (editingVehicle == null) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Checkbox(checked = saveToCatalog, onCheckedChange = { saveToCatalog = it })
+                                        Text("حفظ هذه الماركة والموديل محليًا للاستخدام لاحقًا", color = TextSecondary, fontSize = 11.sp)
+                                    }
+                                }
+                            }
+
+                            // Egyptian Plate: 3 separate letter boxes — divider — 4 separate digit boxes with auto-advance
+                            Card(
+                                colors = CardDefaults.cardColors(containerColor = ObsidianCanvas),
+                                border = BorderStroke(1.dp, SubtleBorder),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Column(
+                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 12.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Text("رقم اللوحة المصرية (ينتقل تلقائيًا)", color = TextSecondary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        // Letters section (3 slots RTL)
+                                        Column(
+                                            modifier = Modifier.weight(3f),
+                                            horizontalAlignment = Alignment.CenterHorizontally
+                                        ) {
+                                            Text("الحروف (2-3)", color = TextSecondary, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                            Spacer(Modifier.height(4.dp))
+                                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.fillMaxWidth()) {
+                                                val letterVals = listOf(l0, l1, l2)
+                                                val letterSetters: List<(String) -> Unit> = listOf({ l0 = it }, { l1 = it }, { l2 = it })
+                                                val placeholders = listOf("ح1", "ح2", "ح3")
+                                                for (idx in 0..2) {
+                                                    PlateSlotBox(
+                                                        value = letterVals[idx],
+                                                        placeholder = placeholders[idx],
+                                                        isDigit = false,
+                                                        imeAction = ImeAction.Next,
+                                                        focusRequester = letterFocus[idx],
+                                                        modifier = Modifier.weight(1f),
+                                                        onValueChange = { raw ->
+                                                            val prev = letterVals[idx]
+                                                            val filtered = raw.replace(Regex("[\\s\\-\\u06400-9٠-٩]+"), "")
+                                                            val clean = when {
+                                                                filtered.isEmpty() -> ""
+                                                                prev.isNotEmpty() && filtered.length > 1 -> {
+                                                                    val rmIdx = filtered.indexOf(prev)
+                                                                    val diff = if (rmIdx >= 0) filtered.removeRange(rmIdx, rmIdx + prev.length) else filtered
+                                                                    diff.takeLast(1)
+                                                                }
+                                                                else -> filtered.takeLast(1)
+                                                            }
+                                                            letterSetters[idx](clean)
+                                                            if (clean.isNotEmpty()) {
+                                                                runCatching {
+                                                                    if (idx < 2) letterFocus[idx + 1].requestFocus()
+                                                                    else digitFocus[0].requestFocus()
+                                                                }
+                                                            }
+                                                        },
+                                                        onBackspaceEmpty = {
+                                                            if (idx > 0) runCatching { letterFocus[idx - 1].requestFocus() }
+                                                        }
+                                                    )
+                                                }
+                                            }
+                                        }
+
+                                        // Clear separator between letters and digits
+                                        Column(
+                                            horizontalAlignment = Alignment.CenterHorizontally,
+                                            modifier = Modifier.padding(top = 16.dp, start = 2.dp, end = 2.dp)
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .width(2.dp)
+                                                    .height(26.dp)
+                                                    .background(CrimsonAccent, RoundedCornerShape(1.dp))
+                                            )
+                                        }
+
+                                        // Digits section (4 slots LTR)
+                                        Column(
+                                            modifier = Modifier.weight(4f),
+                                            horizontalAlignment = Alignment.CenterHorizontally
+                                        ) {
+                                            Text("الأرقام (2-4)", color = TextSecondary, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                            Spacer(Modifier.height(4.dp))
+                                            CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+                                                Row(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.fillMaxWidth()) {
+                                                    val digitVals = listOf(d0, d1, d2, d3)
+                                                    val digitSetters: List<(String) -> Unit> = listOf({ d0 = it }, { d1 = it }, { d2 = it }, { d3 = it })
+                                                    val arDigits = mapOf('٠' to '0', '١' to '1', '٢' to '2', '٣' to '3', '٤' to '4', '٥' to '5', '٦' to '6', '٧' to '7', '٨' to '8', '٩' to '9')
+                                                    for (idx in 0..3) {
+                                                        PlateSlotBox(
+                                                            value = digitVals[idx],
+                                                            placeholder = "${idx + 1}",
+                                                            isDigit = true,
+                                                            imeAction = if (idx < 3) ImeAction.Next else ImeAction.Done,
+                                                            focusRequester = digitFocus[idx],
+                                                            modifier = Modifier.weight(1f),
+                                                            onValueChange = { raw ->
+                                                                val prev = digitVals[idx]
+                                                                val norm = raw.map { arDigits[it] ?: it }.joinToString("").filter { it.isDigit() }
+                                                                val clean = when {
+                                                                    norm.isEmpty() -> ""
+                                                                    prev.isNotEmpty() && norm.length > 1 -> {
+                                                                        val rmIdx = norm.indexOf(prev)
+                                                                        val diff = if (rmIdx >= 0) norm.removeRange(rmIdx, rmIdx + prev.length) else norm
+                                                                        diff.takeLast(1)
+                                                                    }
+                                                                    else -> norm.takeLast(1)
+                                                                }
+                                                                digitSetters[idx](clean)
+                                                                if (clean.isNotEmpty() && idx < 3) {
+                                                                    runCatching { digitFocus[idx + 1].requestFocus() }
+                                                                }
+                                                            },
+                                                            onBackspaceEmpty = {
+                                                                runCatching {
+                                                                    if (idx > 0) digitFocus[idx - 1].requestFocus()
+                                                                    else letterFocus[2].requestFocus()
+                                                                }
+                                                            }
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    if (plateCheck.valid) {
+                                        Text("اللوحة: ${plateCheck.normalized}", color = AlertGreen, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                    } else if ((l0 + l1 + l2).isNotEmpty() || (d0 + d1 + d2 + d3).isNotEmpty()) {
+                                        Text(plateCheck.error ?: "أكمل الحروف (2-3) والأرقام (2-4)", color = AlertYellow, fontSize = 11.sp, textAlign = TextAlign.Center)
+                                    }
+                                }
+                            }
+                        } else if (wizardStep == 2) {
+                            if (editingVehicle == null) {
+                                OutlinedTextField(
+                                    value = odometer,
+                                    onValueChange = { odometer = it },
+                                    label = { Text("قراءة العداد الحالية ($unit) — اختياري") },
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                            Text("وحدة العداد", color = TextSecondary, fontSize = 12.sp)
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                FilterChip(selected = unit == "KM", onClick = { unit = "KM" }, label = { Text("كيلومتر (KM)") })
+                                FilterChip(selected = unit == "MILE", onClick = { unit = "MILE" }, label = { Text("ميل (Mile)") })
+                            }
+                            Text("طريقة الامتلاك", color = TextSecondary, fontSize = 12.sp)
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                FilterChip(selected = ownership == "REGISTERED_CONTRACT", onClick = { ownership = "REGISTERED_CONTRACT" }, label = { Text("عقد مسجل") })
+                                FilterChip(selected = ownership == "POWER_OF_ATTORNEY", onClick = { ownership = "POWER_OF_ATTORNEY" }, label = { Text("شراء بتوكيل") })
+                            }
+                            if (ownership == "POWER_OF_ATTORNEY") {
+                                Text("هل تم عمل عقد مسجل؟ (تنبيه قبل 60 يومًا عند «لا»)", color = AlertYellow, fontSize = 11.sp)
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    FilterChip(selected = poaDone, onClick = { poaDone = true }, label = { Text("نعم، تم عمل عقد مسجل") })
+                                    FilterChip(selected = !poaDone, onClick = { poaDone = false }, label = { Text("لا، لم يُسجل بعد") })
+                                }
+                            }
+                        } else if (wizardStep == 3) {
+                            DatePickerField(label = "تاريخ انتهاء ترخيص السيارة", dateIso = licExpiry, onDateSelected = { licExpiry = it })
+                            OutlinedTextField(value = inspYear, onValueChange = { inspYear = it.filter { c -> c.isDigit() }.take(4) }, label = { Text("سنة الفحص الفني") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
+                            DatePickerField(label = "تاريخ انتهاء رخصة القيادة الشخصية", dateIso = drvExpiry, onDateSelected = { drvExpiry = it })
+                        } else if (wizardStep == 4) {
+                            Text("تجهيزات الطوارئ", fontWeight = FontWeight.Bold, color = TextPrimary, fontSize = 13.sp)
+                            listOf(
+                                Triple("الكوريك", hasJack) { v: Boolean -> hasJack = v },
+                                Triple("مفتاح العجل", hasLugWrench) { v: Boolean -> hasLugWrench = v },
+                                Triple("منفاخ كهربائي", hasAirPump) { v: Boolean -> hasAirPump = v }
+                            ).forEach { (label, current, setter) ->
+                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                                    Text(label, color = TextPrimary, fontSize = 13.sp)
+                                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        FilterChip(selected = current == true, onClick = { setter(true) }, label = { Text("متوفر") })
+                                        FilterChip(selected = current == false, onClick = { setter(false) }, label = { Text("غير متوفر") })
+                                    }
+                                }
+                            }
+                            if (hasJack == false || hasLugWrench == false) {
+                                Text("تنبيه: لابد من توافرهما لسلامتك أثناء السفر", color = AlertRed, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                            if (hasAirPump == false) {
+                                Text("نصيحة: من الضروري امتلاك منفاخ كهربائي للطوارئ", color = AlertYellow, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+
+                            HorizontalDivider(color = SubtleBorder)
+                            Text("بيانات الإطارات", fontWeight = FontWeight.Bold, color = TextPrimary, fontSize = 13.sp)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Checkbox(checked = tiresVaryLater, onCheckedChange = { tiresVaryLater = it })
+                                Text("الإطارات مختلفة (تُدخل لكل إطار لاحقًا)", color = TextSecondary, fontSize = 12.sp)
+                            }
+                            if (!tiresVaryLater) {
+                                OutlinedTextField(value = tireBrand, onValueChange = { tireBrand = it }, label = { Text("ماركة الإطارات") }, modifier = Modifier.fillMaxWidth())
+                                OutlinedTextField(value = tireSize, onValueChange = { tireSize = it }, label = { Text("مقاس الإطارات (مثال: 205/55 R16)") }, modifier = Modifier.fillMaxWidth())
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    OutlinedTextField(value = tireDotWeek, onValueChange = { tireDotWeek = it }, label = { Text("أسبوع DOT (1-53)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f))
+                                    OutlinedTextField(value = tireDotYear, onValueChange = { tireDotYear = it }, label = { Text("سنة DOT (مثال 2024)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f))
                                 }
                             }
                         }
-                        if (hasJack == false || hasLugWrench == false) {
-                            Text("تنبيه: لابد من توافرهما لسلامتك أثناء السفر", color = AlertRed, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                        }
-                        if (hasAirPump == false) {
-                            Text("نصيحة: من الضروري امتلاك منفاخ كهربائي للطوارئ", color = AlertYellow, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                        }
 
-                        HorizontalDivider(color = SubtleBorder)
-                        Text("بيانات الإطارات", fontWeight = FontWeight.Bold, color = TextPrimary, fontSize = 13.sp)
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Checkbox(checked = tiresVaryLater, onCheckedChange = { tiresVaryLater = it })
-                            Text("الإطارات مختلفة (تُدخل لكل إطار لاحقًا)", color = TextSecondary, fontSize = 12.sp)
-                        }
-                        if (!tiresVaryLater) {
-                            OutlinedTextField(value = tireBrand, onValueChange = { tireBrand = it }, label = { Text("ماركة الإطارات") }, modifier = Modifier.fillMaxWidth())
-                            OutlinedTextField(value = tireSize, onValueChange = { tireSize = it }, label = { Text("مقاس الإطارات (مثال: 205/55 R16)") }, modifier = Modifier.fillMaxWidth())
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                OutlinedTextField(value = tireDotWeek, onValueChange = { tireDotWeek = it }, label = { Text("أسبوع DOT (1-53)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f))
-                                OutlinedTextField(value = tireDotYear, onValueChange = { tireDotYear = it }, label = { Text("سنة DOT (مثال 2024)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f))
+                        formError?.let { Text(it, color = AlertRed, fontSize = 12.sp, fontWeight = FontWeight.Bold) }
+
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                            if (wizardStep > 1) {
+                                OutlinedButton(
+                                    onClick = { formError = null; wizardStep -= 1 },
+                                    modifier = Modifier.weight(1f).height(48.dp)
+                                ) { Text("السابق", color = TextPrimary) }
                             }
-                        }
-                    }
-
-                    formError?.let { Text(it, color = AlertRed, fontSize = 12.sp) }
-
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                        if (wizardStep > 1) {
-                            OutlinedButton(
-                                onClick = { formError = null; wizardStep -= 1 },
-                                modifier = Modifier.weight(1f).height(48.dp)
-                            ) { Text("السابق", color = TextPrimary) }
-                        }
-                        if (wizardStep < 4) {
-                            Button(
-                                onClick = {
-                                    formError = null
-                                    if (wizardStep == 1 && (brand.isBlank() || model.isBlank() || (l0 + l1 + l2).isBlank() || (d0 + d1 + d2 + d3).isBlank())) {
-                                        formError = "يرجى إدخال الماركة والموديل ورقم اللوحة."
-                                        return@Button
-                                    }
-                                    wizardStep += 1
-                                },
-                                colors = ButtonDefaults.buttonColors(containerColor = CrimsonAccent),
-                                modifier = Modifier.weight(1f).height(48.dp)
-                            ) { Text("التالي") }
-                        } else {
-                            Button(
-                                onClick = {
-                                    formError = null
-                                    if (hasJack == null || hasLugWrench == null || hasAirPump == null) {
-                                        formError = "يرجى تحديد حالة الكوريك ومفتاح العجل والمنفاخ الكهربائي."
-                                        return@Button
-                                    }
-                                    if (!tiresVaryLater && (tireBrand.isBlank() || tireSize.isBlank() || (tireDotWeek.toIntOrNull() ?: 0) !in 1..53 || (tireDotYear.toIntOrNull() ?: 0) !in 2000..2100)) {
-                                        formError = "يرجى إدخال بيانات الإطارات (الماركة، المقاس، أسبوع وسنة DOT) أو اختيار إدخال كل إطار لاحقًا."
-                                        return@Button
-                                    }
-                                    val letters = (l0 + l1 + l2).trim()
-                                    val digits = (d0 + d1 + d2 + d3).trim()
-                                    val combinedPlate = "$letters $digits"
-                                    val iYr = inspYear.toIntOrNull() ?: defaultLicDate.plusYears(1).year
-                                    val parsedLic = try { LocalDate.parse(licExpiry.take(10)) } catch (_: Exception) { defaultLicDate }
-                                    val computedInsp = parsedLic.withYear(iYr).toString()
-                                    val y = year.toIntOrNull() ?: 2023
-                                    val odo = odometer.trim().takeIf { it.isNotEmpty() }?.toDoubleOrNull()
-                                    onCreate(
-                                        brand, model, y, combinedPlate, unit, odo, ownership, poaDone,
-                                        licExpiry, computedInsp, drvExpiry,
-                                        hasJack, hasLugWrench, hasAirPump,
-                                        if (tiresVaryLater) "" else tireBrand,
-                                        if (tiresVaryLater) "" else tireSize,
-                                        if (tiresVaryLater) null else tireDotWeek.toIntOrNull(),
-                                        if (tiresVaryLater) null else tireDotYear.toIntOrNull()
-                                    )
-                                },
-                                colors = ButtonDefaults.buttonColors(containerColor = CrimsonAccent),
-                                modifier = Modifier.weight(1f).height(48.dp)
-                            ) { Text("حفظ السيارة") }
+                            if (wizardStep < maxStep) {
+                                Button(
+                                    onClick = {
+                                        formError = null
+                                        if (wizardStep == 1) {
+                                            if (brand.isBlank() || model.isBlank()) {
+                                                formError = "يرجى تحديد الماركة والموديل."
+                                                return@Button
+                                            }
+                                            if (!plateCheck.valid) {
+                                                formError = plateCheck.error ?: "يرجى إدخال رقم لوحة مصرية صحيح."
+                                                return@Button
+                                            }
+                                        }
+                                        wizardStep += 1
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = CrimsonAccent),
+                                    modifier = Modifier.weight(1f).height(48.dp)
+                                ) { Text("التالي") }
+                            } else {
+                                Button(
+                                    onClick = {
+                                        formError = null
+                                        val existing = editingVehicle
+                                        if (existing != null) {
+                                            val y = year.toIntOrNull() ?: existing.year
+                                            onUpdate(
+                                                existing.copy(
+                                                    brand = brand.trim(),
+                                                    model = model.trim(),
+                                                    year = y,
+                                                    plateRaw = composedPlate,
+                                                    odometerUnit = unit,
+                                                    ownershipType = ownership,
+                                                    poaRegisteredContractDone = if (ownership == "REGISTERED_CONTRACT") true else poaDone
+                                                )
+                                            )
+                                            showWizard = false
+                                            editingVehicle = null
+                                            return@Button
+                                        }
+                                        if (hasJack == null || hasLugWrench == null || hasAirPump == null) {
+                                            formError = "يرجى تحديد حالة الكوريك ومفتاح العجل والمنفاخ الكهربائي."
+                                            return@Button
+                                        }
+                                        if (!tiresVaryLater && (tireBrand.isBlank() || tireSize.isBlank() || (tireDotWeek.toIntOrNull() ?: 0) !in 1..53 || (tireDotYear.toIntOrNull() ?: 0) !in 2000..2100)) {
+                                            formError = "يرجى إدخال بيانات الإطارات (الماركة، المقاس، أسبوع وسنة DOT) أو اختيار إدخال كل إطار لاحقًا."
+                                            return@Button
+                                        }
+                                        val iYr = inspYear.toIntOrNull() ?: defaultLicDate.plusYears(1).year
+                                        val parsedLic = try { LocalDate.parse(licExpiry.take(10)) } catch (_: Exception) { defaultLicDate }
+                                        val computedInsp = parsedLic.withYear(iYr).toString()
+                                        val y = year.toIntOrNull() ?: 2023
+                                        val odo = odometer.trim().takeIf { it.isNotEmpty() }?.toDoubleOrNull()
+                                        onCreate(
+                                            brand, model, y, composedPlate, unit, odo, ownership, poaDone,
+                                            licExpiry, computedInsp, drvExpiry,
+                                            hasJack, hasLugWrench, hasAirPump,
+                                            if (tiresVaryLater) "" else tireBrand,
+                                            if (tiresVaryLater) "" else tireSize,
+                                            if (tiresVaryLater) null else tireDotWeek.toIntOrNull(),
+                                            if (tiresVaryLater) null else tireDotYear.toIntOrNull(),
+                                            manualMode && saveToCatalog
+                                        )
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = CrimsonAccent),
+                                    modifier = Modifier.weight(1f).height(48.dp)
+                                ) { Text(if (editingVehicle != null) "حفظ التعديلات" else "حفظ السيارة") }
+                            }
                         }
                     }
                 }
             }
         }
+
+        items(activeVehicles) { v ->
+            val isActive = v.id == activeId
+            val displayOdo = UnitConverter.fromInternalKm(v.currentOdometerKm, v.odometerUnit).toInt()
+            Card(
+                modifier = Modifier.fillMaxWidth().clickable { onSelect(v.id) },
+                colors = CardDefaults.cardColors(containerColor = GraphiteSurface),
+                border = BorderStroke(1.5.dp, if (isActive) CrimsonAccent else SubtleBorder),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Filled.DirectionsCar, contentDescription = null, tint = CrimsonAccent, modifier = Modifier.size(32.dp))
+                        Spacer(Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("${v.brand} ${v.model} (${v.year})", fontWeight = FontWeight.Bold, color = TextPrimary, fontSize = 15.sp)
+                            Text(
+                                "اللوحة: ${v.plateNormalized} · ${if (v.hasOdometerReading) "$displayOdo ${v.odometerUnit}" else "العداد غير مسجل"}",
+                                color = TextSecondary,
+                                fontSize = 12.sp
+                            )
+                        }
+                        if (isActive) {
+                            Text("النشطة", color = AlertGreen, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                        if (!isActive) {
+                            Button(
+                                onClick = { onSelect(v.id) },
+                                colors = ButtonDefaults.buttonColors(containerColor = CrimsonAccent),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                modifier = Modifier.height(36.dp)
+                            ) { Text("اختيار", fontSize = 11.sp, fontWeight = FontWeight.Bold) }
+                        }
+                        OutlinedButton(
+                            onClick = { openEditWizard(v) },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                            modifier = Modifier.height(36.dp)
+                        ) { Text("تعديل", fontSize = 11.sp, color = TextPrimary) }
+                        OutlinedButton(
+                            onClick = { onArchive(v.id, true) },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                            modifier = Modifier.height(36.dp)
+                        ) { Text("أرشفة", fontSize = 11.sp, color = AlertYellow) }
+                        OutlinedButton(
+                            onClick = { confirmDeleteVehicle = v },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                            border = BorderStroke(1.dp, AlertRed.copy(alpha = 0.6f)),
+                            modifier = Modifier.height(36.dp)
+                        ) { Text("حذف", fontSize = 11.sp, color = AlertRed, fontWeight = FontWeight.Bold) }
+                    }
+                }
+            }
+        }
+
+        if (showArchived && archivedVehicles.isNotEmpty()) {
+            item {
+                Text("السيارات المؤرشفة", color = TextSecondary, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+            }
+            items(archivedVehicles) { v ->
+                Card(colors = CardDefaults.cardColors(containerColor = GraphiteSurface), border = BorderStroke(1.dp, SubtleBorder)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("${v.brand} ${v.model} (${v.year})", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            Text("اللوحة: ${v.plateNormalized}", color = TextSecondary, fontSize = 11.sp)
+                        }
+                        Button(
+                            onClick = { onArchive(v.id, false) },
+                            colors = ButtonDefaults.buttonColors(containerColor = ElevatedSlate)
+                        ) { Text("استرجاع", color = TextPrimary, fontSize = 11.sp) }
+                    }
+                }
+            }
+        }
+    }
+
+    confirmDeleteVehicle?.let { v ->
+        AlertDialog(
+            onDismissRequest = { confirmDeleteVehicle = null },
+            containerColor = GraphiteSurface,
+            title = { Text("تأكيد حذف السيارة نهائيًا", color = TextPrimary, fontWeight = FontWeight.Bold) },
+            text = {
+                Text(
+                    "سيتم حذف السيارة ${v.brand} ${v.model} (${v.plateNormalized}) وجميع سجلاتها (الوقود، الصيانة، المصروفات، الإطارات، التراخيص) نهائيًا. يمكنك استخدام «أرشفة» بدلًا من الحذف للاحتفاظ بالسجلات.",
+                    color = TextSecondary,
+                    fontSize = 13.sp
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onDeletePermanently(v.id)
+                        confirmDeleteVehicle = null
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = AlertRed)
+                ) { Text("نعم، حذف نهائي", color = Color.White, fontWeight = FontWeight.Bold) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDeleteVehicle = null }) { Text("إلغاء", color = TextSecondary) }
+            }
+        )
     }
 }
 
@@ -1240,11 +2112,18 @@ fun OdometerScreen(bundle: VehicleBundle?, onNormalUpdate: (Double) -> Unit, onC
 }
 
 @Composable
-fun FuelScreen(bundle: VehicleBundle?, onAddFuel: (String, Double, Double, Double, String) -> Unit) {
+fun FuelScreen(
+    bundle: VehicleBundle?,
+    currencySymbol: String = "ج.م",
+    onAddFuel: (String, Double, Double, Double, String, String) -> Unit
+) {
     val v = bundle?.vehicle ?: return
     val analytics = remember(bundle.fuelEntries) { FuelCalculator.calculate(bundle.fuelEntries) }
     var fuelStep by remember { mutableStateOf(1) }
     var fuelType by remember { mutableStateOf("92") }
+    var customFuelMode by remember { mutableStateOf(false) }
+    var customFuelName by remember { mutableStateOf("") }
+    var fillDate by remember { mutableStateOf(LocalDate.now().toString()) }
     var liters by remember { mutableStateOf("") }
     var cost by remember { mutableStateOf("") }
     var odo by remember {
@@ -1264,6 +2143,7 @@ fun FuelScreen(bundle: VehicleBundle?, onAddFuel: (String, Double, Double, Doubl
     val lVal = liters.toDoubleOrNull()
     val cVal = cost.toDoubleOrNull()
     val pricePerLiter = if (lVal != null && lVal > 0 && cVal != null && cVal >= 0) cVal / lVal else null
+    val effectiveFuelType = if (customFuelMode) customFuelName.trim().ifBlank { "وقود مخصص" } else fuelType
 
     LazyColumn(
         state = listState,
@@ -1271,14 +2151,70 @@ fun FuelScreen(bundle: VehicleBundle?, onAddFuel: (String, Double, Double, Doubl
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item {
-            Card(colors = CardDefaults.cardColors(containerColor = GraphiteSurface), border = BorderStroke(1.dp, SubtleBorder)) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text("المتوسط العام المرجح (Full-to-Full)", color = TextSecondary, fontSize = 12.sp)
-                    Text(
-                        analytics.overallKmPerLiter?.let { String.format("%.2f كم/لتر", it) } ?: "تحتاج تفويلتين كاملتين متتاليتين",
-                        color = TextPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold
-                    )
-                    Text("إجمالي اللترات: ${analytics.totalLiters} · إجمالي المصروف: ${UnitConverter.formatMoney(analytics.totalCostPiastres)}", color = TextSecondary, fontSize = 12.sp)
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    Card(
+                        modifier = Modifier.weight(1f),
+                        colors = CardDefaults.cardColors(containerColor = GraphiteSurface),
+                        border = BorderStroke(1.dp, SubtleBorder)
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Text("المتوسط العام (كم/لتر)", color = TextSecondary, fontSize = 11.sp)
+                            Text(
+                                analytics.overallKmPerLiter?.let { String.format("%.2f كم/لتر", it) } ?: "—",
+                                color = AlertGreen,
+                                fontSize = 17.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                    Card(
+                        modifier = Modifier.weight(1f),
+                        colors = CardDefaults.cardColors(containerColor = GraphiteSurface),
+                        border = BorderStroke(1.dp, SubtleBorder)
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Text("لتر / 100 كم", color = TextSecondary, fontSize = 11.sp)
+                            Text(
+                                analytics.overallLitersPer100Km?.let { String.format("%.1f لتر", it) } ?: "—",
+                                color = TextPrimary,
+                                fontSize = 17.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    Card(
+                        modifier = Modifier.weight(1f),
+                        colors = CardDefaults.cardColors(containerColor = GraphiteSurface),
+                        border = BorderStroke(1.dp, SubtleBorder)
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Text("تكلفة الـ 100 كم", color = TextSecondary, fontSize = 11.sp)
+                            Text(
+                                analytics.costPer100KmPiastres?.let { UnitConverter.formatMoney(it, currencySymbol) } ?: "—",
+                                color = Color(0xFF0EA5E9),
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                    Card(
+                        modifier = Modifier.weight(1f),
+                        colors = CardDefaults.cardColors(containerColor = GraphiteSurface),
+                        border = BorderStroke(1.dp, SubtleBorder)
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Text("إجمالي وقود (${String.format("%.1f", analytics.totalLiters)} لتر)", color = TextSecondary, fontSize = 11.sp)
+                            Text(
+                                UnitConverter.formatMoney(analytics.totalCostPiastres, currencySymbol),
+                                color = CrimsonAccent,
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -1312,11 +2248,34 @@ fun FuelScreen(bundle: VehicleBundle?, onAddFuel: (String, Double, Double, Doubl
                             FilterChip(selected = fillType == "FULL", onClick = { fillType = "FULL" }, label = { Text("تفويلة كاملة") })
                             FilterChip(selected = fillType == "PARTIAL", onClick = { fillType = "PARTIAL" }, label = { Text("تعبئة جزئية") })
                         }
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            listOf("80", "92", "95", "سولار").forEach { ft ->
-                                FilterChip(selected = fuelType == ft, onClick = { fuelType = ft }, label = { Text(ft) })
+                        listOf(listOf("80", "92", "95"), listOf("سولار", "__CUSTOM__")).forEach { rowTypes ->
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                                rowTypes.forEach { ft ->
+                                    if (ft == "__CUSTOM__") {
+                                        FilterChip(
+                                            selected = customFuelMode,
+                                            onClick = { customFuelMode = true },
+                                            label = { Text("+ نوع وقود مخصص", fontSize = 11.sp) }
+                                        )
+                                    } else {
+                                        FilterChip(
+                                            selected = !customFuelMode && fuelType == ft,
+                                            onClick = { customFuelMode = false; fuelType = ft },
+                                            label = { Text(ft, fontSize = 11.sp) }
+                                        )
+                                    }
+                                }
                             }
                         }
+                        if (customFuelMode) {
+                            OutlinedTextField(
+                                value = customFuelName,
+                                onValueChange = { customFuelName = it },
+                                label = { Text("اسم نوع الوقود المخصص (مثال: غاز طبيعي)") },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                        DatePickerField(label = "تاريخ التعبئة", dateIso = fillDate, onDateSelected = { fillDate = it })
                         OutlinedTextField(value = odo, onValueChange = { odo = it }, label = { Text("قراءة العداد (${v.odometerUnit})") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
                         formError?.let { Text(it, color = AlertRed, fontSize = 12.sp) }
                         Button(
@@ -1324,6 +2283,8 @@ fun FuelScreen(bundle: VehicleBundle?, onAddFuel: (String, Double, Double, Doubl
                                 val o = odo.toDoubleOrNull()
                                 if (o == null || o < 0) {
                                     formError = "يرجى إدخال قراءة عداد صحيحة."
+                                } else if (customFuelMode && customFuelName.isBlank()) {
+                                    formError = "يرجى كتابة اسم نوع الوقود المخصص."
                                 } else {
                                     formError = null
                                     fuelStep = 2
@@ -1334,9 +2295,9 @@ fun FuelScreen(bundle: VehicleBundle?, onAddFuel: (String, Double, Double, Doubl
                         ) { Text("التالي: الكمية والتكلفة") }
                     } else if (fuelStep == 2) {
                         OutlinedTextField(value = liters, onValueChange = { liters = it }, label = { Text("اللترات") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.fillMaxWidth())
-                        OutlinedTextField(value = cost, onValueChange = { cost = it }, label = { Text("المبلغ الإجمالي") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.fillMaxWidth())
+                        OutlinedTextField(value = cost, onValueChange = { cost = it }, label = { Text("المبلغ الإجمالي ($currencySymbol)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.fillMaxWidth())
                         if (pricePerLiter != null) {
-                            Text("سعر اللتر المحسوب: ${String.format("%.2f", pricePerLiter)}", color = AlertGreen, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            Text("سعر اللتر المحسوب: ${String.format("%.2f", pricePerLiter)} $currencySymbol", color = AlertGreen, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                         }
                         formError?.let { Text(it, color = AlertRed, fontSize = 12.sp) }
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
@@ -1360,10 +2321,10 @@ fun FuelScreen(bundle: VehicleBundle?, onAddFuel: (String, Double, Double, Doubl
                     } else {
                         Card(colors = CardDefaults.cardColors(containerColor = ObsidianCanvas), border = BorderStroke(1.dp, SubtleBorder)) {
                             Column(modifier = Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Text("وقود $fuelType (${if (fillType == "FULL") "تفويلة كاملة" else "تعبئة جزئية"})", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                                Text("العداد: $odo ${v.odometerUnit} · الكمية: $liters لتر · الإجمالي: $cost", color = TextSecondary, fontSize = 12.sp)
+                                Text("وقود $effectiveFuelType (${if (fillType == "FULL") "تفويلة كاملة" else "تعبئة جزئية"}) · $fillDate", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                Text("العداد: $odo ${v.odometerUnit} · الكمية: $liters لتر · الإجمالي: $cost $currencySymbol", color = TextSecondary, fontSize = 12.sp)
                                 if (pricePerLiter != null) {
-                                    Text("سعر اللتر التاريخي: ${String.format("%.2f", pricePerLiter)}", color = AlertGreen, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                    Text("سعر اللتر التاريخي: ${String.format("%.2f", pricePerLiter)} $currencySymbol", color = AlertGreen, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                                 }
                             }
                         }
@@ -1377,7 +2338,8 @@ fun FuelScreen(bundle: VehicleBundle?, onAddFuel: (String, Double, Double, Doubl
                                     val l = liters.toDoubleOrNull() ?: return@Button
                                     val c = cost.toDoubleOrNull() ?: return@Button
                                     val o = odo.toDoubleOrNull() ?: return@Button
-                                    onAddFuel(fuelType, l, c, o, fillType)
+                                    val dt = "${fillDate}T${LocalTime.now().toString().take(5).padEnd(5, '0')}"
+                                    onAddFuel(effectiveFuelType, l, c, o, fillType, dt)
                                     liters = ""; cost = ""; fuelStep = 1
                                 },
                                 colors = ButtonDefaults.buttonColors(containerColor = CrimsonAccent),
@@ -1392,7 +2354,7 @@ fun FuelScreen(bundle: VehicleBundle?, onAddFuel: (String, Double, Double, Doubl
             Card(colors = CardDefaults.cardColors(containerColor = GraphiteSurface)) {
                 Column(modifier = Modifier.padding(12.dp)) {
                     Text("${p.fuelType} (${if (p.fillType == "FULL") "كاملة" else "جزئية"}) — ${p.liters} لتر", color = TextPrimary, fontWeight = FontWeight.Bold)
-                    Text("المبلغ: ${UnitConverter.formatMoney(p.totalCostPiastres)} · سعر اللتر: ${UnitConverter.formatMoney(p.pricePerLiterPiastres)}", color = TextSecondary, fontSize = 12.sp)
+                    Text("المبلغ: ${UnitConverter.formatMoney(p.totalCostPiastres, currencySymbol)} · سعر اللتر: ${UnitConverter.formatMoney(p.pricePerLiterPiastres, currencySymbol)}", color = TextSecondary, fontSize = 12.sp)
                     p.kmPerLiter?.let { Text("الاستهلاك الفعلي: ${String.format("%.2f كم/لتر", it)}", color = AlertGreen, fontSize = 12.sp) }
                     p.excludedReason?.let { Text(it, color = TextSecondary, fontSize = 11.sp) }
                 }
@@ -1402,10 +2364,15 @@ fun FuelScreen(bundle: VehicleBundle?, onAddFuel: (String, Double, Double, Doubl
 }
 
 @Composable
-fun EngineOilScreen(bundle: VehicleBundle?, onSaveOil: (String, Double, String, String, Double?, Double, Boolean, Double, String, String) -> Unit) {
+fun EngineOilScreen(
+    bundle: VehicleBundle?,
+    currencySymbol: String = "ج.م",
+    onSaveOil: (String, Double, String, String, Double?, Double, Boolean, Double, String, String) -> Unit
+) {
     val v = bundle?.vehicle ?: return
     val currentOdoDisplay = if (v.hasOdometerReading) UnitConverter.fromInternalKm(v.currentOdometerKm, v.odometerUnit).toInt().toString() else ""
     var odoText by remember(v.id) { mutableStateOf(currentOdoDisplay) }
+    var changeDate by remember { mutableStateOf(LocalDate.now().toString()) }
     var brand by remember { mutableStateOf("") }
     var visc by remember { mutableStateOf("5W-30") }
     var interval by remember { mutableStateOf("") }
@@ -1415,7 +2382,6 @@ fun EngineOilScreen(bundle: VehicleBundle?, onSaveOil: (String, Double, String, 
     var source by remember { mutableStateOf("MANUAL") }
     var mech by remember { mutableStateOf("") }
     var oilWizardStep by remember { mutableStateOf(1) }
-    val todayStr = remember { LocalDate.now().toString() }
     val oilRecords = bundle.maintenanceRecords.filter { it.typeCode == "ENGINE_OIL" || it.typeCode == "OIL_FILTER" }
     val listState = rememberLazyListState()
 
@@ -1427,8 +2393,8 @@ fun EngineOilScreen(bundle: VehicleBundle?, onSaveOil: (String, Double, String, 
     val intervalKmNum = interval.toDoubleOrNull()?.takeIf { it > 0 }
     val intervalInUnit = intervalKmNum?.let { UnitConverter.fromInternalKm(it, v.odometerUnit) }
     val previewNextOdo = if (odoNum != null && intervalInUnit != null) (odoNum + intervalInUnit).roundToInt() else null
-    val previewNextDate = remember(todayStr) {
-        try { LocalDate.parse(todayStr).plusMonths(12L).toString() } catch (_: Exception) { null }
+    val previewNextDate = remember(changeDate) {
+        try { LocalDate.parse(changeDate.take(10)).plusMonths(12L).toString() } catch (_: Exception) { null }
     }
 
     LazyColumn(
@@ -1462,6 +2428,7 @@ fun EngineOilScreen(bundle: VehicleBundle?, onSaveOil: (String, Double, String, 
                     }
 
                     if (oilWizardStep == 1) {
+                        DatePickerField(label = "تاريخ تغيير الزيت", dateIso = changeDate, onDateSelected = { changeDate = it })
                         OutlinedTextField(value = odoText, onValueChange = { odoText = it }, label = { Text("قراءة العداد (${v.odometerUnit})") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
                         OutlinedTextField(value = brand, onValueChange = { brand = it }, label = { Text("نوع وماركة الزيت") }, modifier = Modifier.fillMaxWidth())
                         OutlinedTextField(value = visc, onValueChange = { visc = it }, label = { Text("اللزوجة") }, modifier = Modifier.fillMaxWidth())
@@ -1520,17 +2487,17 @@ fun EngineOilScreen(bundle: VehicleBundle?, onSaveOil: (String, Double, String, 
                     } else {
                         Card(colors = CardDefaults.cardColors(containerColor = ObsidianCanvas), border = BorderStroke(1.dp, SubtleBorder)) {
                             Column(modifier = Modifier.fillMaxWidth().padding(10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                Text("${brand.ifBlank { "زيت المحرك" }} ($visc) · عداد ${odoText.ifBlank { "-" }} ${v.odometerUnit}", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                Text("${brand.ifBlank { "زيت المحرك" }} ($visc) · $changeDate · عداد ${odoText.ifBlank { "-" }} ${v.odometerUnit}", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                                 previewNextOdo?.let { Text("التغيير القادم: $it ${v.odometerUnit} أو ${previewNextDate ?: ""}", color = AlertGreen, fontSize = 11.sp, fontWeight = FontWeight.Bold) }
                             }
                         }
-                        OutlinedTextField(value = cost, onValueChange = { cost = it }, label = { Text("تكلفة الزيت") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.fillMaxWidth())
+                        OutlinedTextField(value = cost, onValueChange = { cost = it }, label = { Text("تكلفة الزيت ($currencySymbol)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.fillMaxWidth())
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Checkbox(checked = filterChanged, onCheckedChange = { filterChanged = it })
                             Text("هل تم تغيير فلتر الزيت؟", color = TextPrimary)
                         }
                         if (filterChanged) {
-                            OutlinedTextField(value = filterCost, onValueChange = { filterCost = it }, label = { Text("تكلفة الفلتر (اختياري)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.fillMaxWidth())
+                            OutlinedTextField(value = filterCost, onValueChange = { filterCost = it }, label = { Text("تكلفة الفلتر ($currencySymbol - اختياري)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.fillMaxWidth())
                         }
                         OutlinedTextField(value = mech, onValueChange = { mech = it }, label = { Text("اسم الميكانيكي/المركز (اختياري)") }, modifier = Modifier.fillMaxWidth())
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
@@ -1542,7 +2509,7 @@ fun EngineOilScreen(bundle: VehicleBundle?, onSaveOil: (String, Double, String, 
                                 onClick = {
                                     val odoSubmit = odoText.toDoubleOrNull() ?: UnitConverter.fromInternalKm(v.currentOdometerKm, v.odometerUnit)
                                     onSaveOil(
-                                        todayStr,
+                                        changeDate,
                                         odoSubmit,
                                         brand,
                                         visc,
@@ -1582,7 +2549,7 @@ fun EngineOilScreen(bundle: VehicleBundle?, onSaveOil: (String, Double, String, 
                         val note = if (rec.typeCode == "ENGINE_OIL") " (سنة واحدة - تقديرية)" else ""
                         Text("أو بتاريخ: $dueDate$note", color = AlertGreen, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     }
-                    Text("التكلفة: ${UnitConverter.formatMoney(rec.costPiastres)}", color = TextSecondary, fontSize = 12.sp)
+                    Text("التكلفة: ${UnitConverter.formatMoney(rec.costPiastres, currencySymbol)}", color = TextSecondary, fontSize = 12.sp)
                 }
             }
         }
@@ -1592,7 +2559,9 @@ fun EngineOilScreen(bundle: VehicleBundle?, onSaveOil: (String, Double, String, 
 @Composable
 fun MaintenanceScreen(
     bundle: VehicleBundle?,
-    onSaveMaintenance: (String, String, String?, String, Double, String, Double?, Double, String, String) -> Unit
+    currencySymbol: String = "ج.م",
+    onAddCustomType: (String, String?) -> Unit,
+    onSaveMaintenance: (String, String, String?, String, Double, String, Double?, Double, String, String, String, String?, Int?) -> Unit
 ) {
     val v = bundle?.vehicle ?: return
     val rankMap = mapOf(
@@ -1612,10 +2581,17 @@ fun MaintenanceScreen(
         .filter { it.code != "ENGINE_OIL" && it.code != "OIL_FILTER" }
         .sortedBy { rankMap[it.code] ?: 50 }
     var selectedType by remember(generalTypes) { mutableStateOf(generalTypes.firstOrNull()) }
+    var showAddCustom by remember { mutableStateOf(false) }
+    var newCustomName by remember { mutableStateOf("") }
+    var newCustomDesc by remember { mutableStateOf("") }
+    var maintDate by remember { mutableStateOf(LocalDate.now().toString()) }
     var brand by remember { mutableStateOf("") }
     var interval by remember { mutableStateOf("") }
     var cost by remember { mutableStateOf("") }
     var source by remember { mutableStateOf("MANUAL") }
+    var conditionStatus by remember { mutableStateOf("GOOD") }
+    var beltKind by remember { mutableStateOf("سير دينامو") }
+    var warrantyMonths by remember { mutableStateOf("12") }
     var mech by remember { mutableStateOf("") }
     var maintStep by remember { mutableStateOf(1) }
     val generalRecords = bundle.maintenanceRecords.filter { it.typeCode != "ENGINE_OIL" && it.typeCode != "OIL_FILTER" }
@@ -1668,11 +2644,37 @@ fun MaintenanceScreen(
                                     FilterChip(
                                         selected = selectedType?.id == mt.id,
                                         onClick = { selectedType = mt },
-                                        label = { Text(mt.name, fontSize = 11.sp) },
+                                        label = { Text(mt.name, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                                         modifier = Modifier.weight(1f)
                                     )
                                 }
                                 if (rowItems.size == 1) Spacer(Modifier.weight(1f))
+                            }
+                        }
+                        OutlinedButton(
+                            onClick = { showAddCustom = !showAddCustom },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(if (showAddCustom) Icons.Filled.Close else Icons.Filled.Add, contentDescription = null, tint = CrimsonAccent, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(if (showAddCustom) "إغلاق البند المخصص" else "+ إضافة بند صيانة مخصص", color = CrimsonAccent, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                        if (showAddCustom) {
+                            Card(colors = CardDefaults.cardColors(containerColor = ObsidianCanvas), border = BorderStroke(1.dp, SubtleBorder)) {
+                                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    OutlinedTextField(value = newCustomName, onValueChange = { newCustomName = it }, label = { Text("اسم البند (مثال: زيت الباور / دورة التبريد)") }, modifier = Modifier.fillMaxWidth())
+                                    OutlinedTextField(value = newCustomDesc, onValueChange = { newCustomDesc = it }, label = { Text("وصف مختصر (اختياري)") }, modifier = Modifier.fillMaxWidth())
+                                    Button(
+                                        onClick = {
+                                            if (newCustomName.isNotBlank()) {
+                                                onAddCustomType(newCustomName.trim(), newCustomDesc.trim().ifBlank { null })
+                                                newCustomName = ""; newCustomDesc = ""; showAddCustom = false
+                                            }
+                                        },
+                                        colors = ButtonDefaults.buttonColors(containerColor = CrimsonAccent),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) { Text("حفظ البند المخصص") }
+                                }
                             }
                         }
                         Button(
@@ -1681,9 +2683,36 @@ fun MaintenanceScreen(
                             modifier = Modifier.fillMaxWidth().height(48.dp)
                         ) { Text("التالي: التفاصيل والموعد") }
                     } else if (maintStep == 2) {
+                        DatePickerField(label = "تاريخ الصيانة", dateIso = maintDate, onDateSelected = { maintDate = it })
+                        Text("مصدر الجدولة", color = TextSecondary, fontSize = 11.sp)
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             FilterChip(selected = source == "OEM", onClick = { source = "OEM" }, label = { Text("توصية الشركة المصنعة") })
                             FilterChip(selected = source == "MANUAL", onClick = { source = "MANUAL" }, label = { Text("إدخال يدوي") })
+                        }
+                        Text("حالة البند بعد الفحص", color = TextSecondary, fontSize = 11.sp)
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            FilterChip(selected = conditionStatus == "GOOD", onClick = { conditionStatus = "GOOD" }, label = { Text("سليم", fontSize = 11.sp) })
+                            FilterChip(selected = conditionStatus == "FOLLOW_UP", onClick = { conditionStatus = "FOLLOW_UP" }, label = { Text("متابعة", fontSize = 11.sp) })
+                            FilterChip(selected = conditionStatus == "NEEDS_REPLACEMENT", onClick = { conditionStatus = "NEEDS_REPLACEMENT" }, label = { Text("يحتاج تغيير", fontSize = 11.sp) })
+                        }
+                        if (selectedType?.code == "BELTS") {
+                            Text("نوع السير", color = TextSecondary, fontSize = 11.sp)
+                            listOf(listOf("سير دينامو", "سير كاتينة"), listOf("سير تكييف", "طقم سيور كامل")).forEach { bRow ->
+                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                                    bRow.forEach { bk ->
+                                        FilterChip(selected = beltKind == bk, onClick = { beltKind = bk }, label = { Text(bk, fontSize = 11.sp) }, modifier = Modifier.weight(1f))
+                                    }
+                                }
+                            }
+                        }
+                        if (selectedType?.code == "BATTERY") {
+                            OutlinedTextField(
+                                value = warrantyMonths,
+                                onValueChange = { warrantyMonths = it.filter { c -> c.isDigit() } },
+                                label = { Text("مدة ضمان البطارية (بالشهور — مثال: 12)") },
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                modifier = Modifier.fillMaxWidth()
+                            )
                         }
                         OutlinedTextField(value = brand, onValueChange = { brand = it }, label = { Text("النوع / الماركة") }, modifier = Modifier.fillMaxWidth())
                         OutlinedTextField(value = interval, onValueChange = { interval = it }, label = { Text("فترة التغيير (${v.odometerUnit}) اختياري") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
@@ -1701,11 +2730,11 @@ fun MaintenanceScreen(
                     } else {
                         Card(colors = CardDefaults.cardColors(containerColor = ObsidianCanvas), border = BorderStroke(1.dp, SubtleBorder)) {
                             Column(modifier = Modifier.fillMaxWidth().padding(10.dp)) {
-                                Text("${selectedType?.name ?: "صيانة"}${if (brand.isNotBlank()) " · $brand" else ""}", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                Text("${selectedType?.name ?: "صيانة"}${if (brand.isNotBlank()) " · $brand" else ""} · $maintDate", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                                 if (interval.isNotBlank()) Text("الفترة: $interval ${v.odometerUnit}", color = AlertGreen, fontSize = 11.sp)
                             }
                         }
-                        OutlinedTextField(value = cost, onValueChange = { cost = it }, label = { Text("التكلفة") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.fillMaxWidth())
+                        OutlinedTextField(value = cost, onValueChange = { cost = it }, label = { Text("التكلفة ($currencySymbol)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.fillMaxWidth())
                         OutlinedTextField(value = mech, onValueChange = { mech = it }, label = { Text("اسم الميكانيكي/المركز (اختياري)") }, modifier = Modifier.fillMaxWidth())
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                             OutlinedButton(
@@ -1719,13 +2748,16 @@ fun MaintenanceScreen(
                                         mt.id,
                                         mt.code,
                                         if (mt.isCustom) mt.name else null,
-                                        LocalDate.now().toString(),
+                                        maintDate,
                                         UnitConverter.fromInternalKm(v.currentOdometerKm, v.odometerUnit),
                                         brand,
                                         interval.toDoubleOrNull(),
                                         cost.toDoubleOrNull() ?: 0.0,
                                         source,
-                                        mech
+                                        mech,
+                                        conditionStatus,
+                                        if (mt.code == "BELTS") beltKind else null,
+                                        if (mt.code == "BATTERY") warrantyMonths.toIntOrNull() else null
                                     )
                                     brand = ""; cost = ""; interval = ""; maintStep = 1
                                 },
@@ -1738,10 +2770,26 @@ fun MaintenanceScreen(
             }
         }
         items(generalRecords) { rec ->
+            val recTitle = rec.customName ?: when (rec.typeCode) {
+                "AIR_FILTER" -> "فلتر الهواء"
+                "AC_FILTER" -> "فلتر التكييف"
+                "BRAKE_PADS" -> "تيل الفرامل"
+                "SPARK_PLUGS" -> "البوجيهات"
+                "BATTERY" -> "البطارية"
+                "BELTS" -> "السيور"
+                "SUSPENSION" -> "العفشة والمساعدين"
+                "TRANSMISSION_OIL" -> "زيت الفتيس"
+                "COOLANT" -> "سائل التبريد"
+                "AC_FREON" -> "فريون التكييف"
+                else -> rec.typeCode
+            }
             Card(colors = CardDefaults.cardColors(containerColor = GraphiteSurface)) {
-                Column(modifier = Modifier.padding(12.dp)) {
-                    Text("${rec.customName ?: rec.typeCode} — ${rec.date}", color = TextPrimary, fontWeight = FontWeight.Bold)
-                    Text("التكلفة: ${UnitConverter.formatMoney(rec.costPiastres)}", color = TextSecondary, fontSize = 12.sp)
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text("$recTitle${rec.beltKind?.let { " ($it)" } ?: ""} — ${rec.date}", color = TextPrimary, fontWeight = FontWeight.Bold)
+                    Text("التكلفة: ${UnitConverter.formatMoney(rec.costPiastres, currencySymbol)}${rec.brandOrType?.let { " · $it" } ?: ""}", color = TextSecondary, fontSize = 12.sp)
+                    rec.warrantyExpiryDate?.let { w ->
+                        Text("نهاية الضمان: $w", color = AlertGreen, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
                 }
             }
         }
@@ -1749,9 +2797,14 @@ fun MaintenanceScreen(
 }
 
 @Composable
-fun ExpensesScreen(bundle: VehicleBundle?, onAddAdditional: (String, String, Double, String) -> Unit) {
+fun ExpensesScreen(
+    bundle: VehicleBundle?,
+    currencySymbol: String = "ج.م",
+    onAddAdditional: (String, String, Double, String) -> Unit
+) {
     if (bundle == null) return
     var category by remember { mutableStateOf("غسيل") }
+    var expDate by remember { mutableStateOf(LocalDate.now().toString()) }
     var amount by remember { mutableStateOf("") }
     var notes by remember { mutableStateOf("") }
 
@@ -1760,15 +2813,22 @@ fun ExpensesScreen(bundle: VehicleBundle?, onAddAdditional: (String, String, Dou
             Card(colors = CardDefaults.cardColors(containerColor = GraphiteSurface)) {
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("إضافة مصروف إضافي (غير تلقائي)", fontWeight = FontWeight.Bold, color = TextPrimary)
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        listOf("غسيل", "معطرات ومنظفات", "إكسسوارات", "ركنة وجراج", "أخرى").forEach { c ->
-                            FilterChip(selected = category == c, onClick = { category = c }, label = { Text(c, fontSize = 11.sp) })
+                    listOf("غسيل", "معطرات ومنظفات", "إكسسوارات", "ركنة وجراج", "أخرى").chunked(3).forEach { catRow ->
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                            catRow.forEach { c ->
+                                FilterChip(
+                                    selected = category == c,
+                                    onClick = { category = c },
+                                    label = { Text(c, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                                )
+                            }
                         }
                     }
-                    OutlinedTextField(value = amount, onValueChange = { amount = it }, label = { Text("المبلغ") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.fillMaxWidth())
+                    DatePickerField(label = "تاريخ المصروف", dateIso = expDate, onDateSelected = { expDate = it })
+                    OutlinedTextField(value = amount, onValueChange = { amount = it }, label = { Text("المبلغ ($currencySymbol)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(value = notes, onValueChange = { notes = it }, label = { Text("ملاحظات") }, modifier = Modifier.fillMaxWidth())
                     Button(
-                        onClick = { amount.toDoubleOrNull()?.let { onAddAdditional(category, LocalDate.now().toString(), it, notes); amount = ""; notes = "" } },
+                        onClick = { amount.toDoubleOrNull()?.let { onAddAdditional(category, expDate, it, notes); amount = ""; notes = "" } },
                         colors = ButtonDefaults.buttonColors(containerColor = CrimsonAccent),
                         modifier = Modifier.fillMaxWidth()
                     ) { Text("حفظ المصروف") }
@@ -1778,11 +2838,11 @@ fun ExpensesScreen(bundle: VehicleBundle?, onAddAdditional: (String, String, Dou
         items(bundle.expenses) { exp ->
             Card(colors = CardDefaults.cardColors(containerColor = GraphiteSurface)) {
                 Row(modifier = Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(exp.categoryLabel, color = TextPrimary, fontWeight = FontWeight.Bold)
                         Text("${exp.date} · ${if (exp.isAutomatic) "تلقائي" else "إضافي"}", color = TextSecondary, fontSize = 11.sp)
                     }
-                    Text(UnitConverter.formatMoney(exp.amountPiastres), color = CrimsonAccent, fontWeight = FontWeight.Bold)
+                    Text(UnitConverter.formatMoney(exp.amountPiastres, currencySymbol), color = CrimsonAccent, fontWeight = FontWeight.Bold)
                 }
             }
         }
@@ -1798,7 +2858,7 @@ private data class AndroidMonthChartPoint(
 )
 
 @Composable
-fun ReportsScreen(bundle: VehicleBundle?) {
+fun ReportsScreen(bundle: VehicleBundle?, currencySymbol: String = "ج.م") {
     if (bundle == null) return
     val total = bundle.expenses.sumOf { it.amountPiastres }
     val fuel = bundle.expenses.filter { it.sourceType == "FUEL" }.sumOf { it.amountPiastres }
@@ -1986,9 +3046,9 @@ fun ReportsScreen(bundle: VehicleBundle?) {
                             Column(modifier = Modifier.fillMaxWidth().padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                 Text("تفاصيل ${activePt.shortLabel} (${activePt.monthKey})", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                    Text("وقود: ${UnitConverter.formatMoney(activePt.fuel)}", color = fuelColor, fontWeight = FontWeight.Bold, fontSize = 11.sp)
-                                    Text("صيانة: ${UnitConverter.formatMoney(activePt.maint)}", color = maintColor, fontWeight = FontWeight.Bold, fontSize = 11.sp)
-                                    Text("إصلاحات: ${UnitConverter.formatMoney(activePt.repairs)}", color = repairColor, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                                    Text("وقود: ${UnitConverter.formatMoney(activePt.fuel, currencySymbol)}", color = fuelColor, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                                    Text("صيانة: ${UnitConverter.formatMoney(activePt.maint, currencySymbol)}", color = maintColor, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                                    Text("إصلاحات: ${UnitConverter.formatMoney(activePt.repairs, currencySymbol)}", color = repairColor, fontWeight = FontWeight.Bold, fontSize = 11.sp)
                                 }
                             }
                         }
@@ -2040,7 +3100,7 @@ fun ReportsScreen(bundle: VehicleBundle?) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Text("6 أشهر", fontSize = 10.sp, color = TextSecondary)
                             Text(
-                                UnitConverter.formatMoney(sixGrandTotal),
+                                UnitConverter.formatMoney(sixGrandTotal, currencySymbol),
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = TextPrimary
@@ -2065,7 +3125,7 @@ fun ReportsScreen(bundle: VehicleBundle?) {
                                     Box(modifier = Modifier.size(9.dp).clip(CircleShape).background(col))
                                     Text(label, fontSize = 12.sp, color = TextPrimary, fontWeight = FontWeight.Bold)
                                 }
-                                Text("${UnitConverter.formatMoney(amt)} ($pct%)", fontSize = 11.sp, color = TextSecondary, fontWeight = FontWeight.Bold)
+                                Text("${UnitConverter.formatMoney(amt, currencySymbol)} ($pct%)", fontSize = 11.sp, color = TextSecondary, fontWeight = FontWeight.Bold)
                             }
                         }
                     }
@@ -2086,7 +3146,7 @@ fun ReportsScreen(bundle: VehicleBundle?) {
             Card(colors = CardDefaults.cardColors(containerColor = GraphiteSurface)) {
                 Row(modifier = Modifier.fillMaxWidth().padding(14.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text(label, color = TextPrimary, fontWeight = FontWeight.SemiBold)
-                    Text(UnitConverter.formatMoney(valPiastres), color = CrimsonAccent, fontWeight = FontWeight.Bold)
+                    Text(UnitConverter.formatMoney(valPiastres, currencySymbol), color = CrimsonAccent, fontWeight = FontWeight.Bold)
                 }
             }
         }
@@ -2095,6 +3155,14 @@ fun ReportsScreen(bundle: VehicleBundle?) {
 
 @Composable
 fun BackupScreen(
+    hasVehicle: Boolean,
+    currencyCode: String,
+    currencySymbol: String,
+    themeMode: String,
+    systemIsDark: Boolean,
+    onSelectThemeMode: (String) -> Unit,
+    onUpdateCurrency: (String, String) -> Unit,
+    onNavigate: (ScreenRoute) -> Unit,
     onExport: (Uri) -> Unit,
     onImportPreview: (Uri, (Boolean, String, String, Boolean) -> Unit) -> Unit,
     onConfirmRestore: (String, Boolean) -> Unit
@@ -2103,6 +3171,8 @@ fun BackupScreen(
     var pendingJson by remember { mutableStateOf<String?>(null) }
     var pendingIsDup by remember { mutableStateOf(false) }
     var allowDup by remember { mutableStateOf(false) }
+    var editCode by remember(currencyCode) { mutableStateOf(currencyCode) }
+    var editSymbol by remember(currencySymbol) { mutableStateOf(currencySymbol) }
 
     val createDoc = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
         uri?.let(onExport)
@@ -2118,34 +3188,132 @@ fun BackupScreen(
         }
     }
 
-    Column(modifier = Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text("النسخ الاحتياطي يدوي فقط لحماية بياناتك عبر Storage Access Framework.", color = TextSecondary)
-        Button(
-            onClick = { createDoc.launch("MyCar-Backup-${LocalDate.now()}.json") },
-            colors = ButtonDefaults.buttonColors(containerColor = CrimsonAccent),
-            modifier = Modifier.fillMaxWidth().height(50.dp)
-        ) { Text("إنشاء نسخة احتياطية") }
-        OutlinedButton(
-            onClick = { openDoc.launch(arrayOf("application/json")) },
-            modifier = Modifier.fillMaxWidth().height(50.dp)
-        ) { Text("فحص واستعادة نسخة احتياطية", color = TextPrimary) }
-        previewMessage?.let { Text(it, color = AlertYellow) }
-        if (pendingJson != null) {
-            if (pendingIsDup) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(checked = allowDup, onCheckedChange = { allowDup = it })
-                    Text("نسخة مستعادة سابقًا — السماح بإعادة الاستعادة", color = AlertYellow, fontSize = 12.sp)
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        item {
+            Card(colors = CardDefaults.cardColors(containerColor = GraphiteSurface), border = BorderStroke(1.dp, SubtleBorder)) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("أقسام إضافية سريعة", fontWeight = FontWeight.Bold, color = TextPrimary, fontSize = 14.sp)
+                    listOf(
+                        Triple(ScreenRoute.VEHICLES, "مبدّل السيارات وإدارتها", Icons.Filled.DirectionsCar),
+                        Triple(ScreenRoute.REPORTS, "تقرير السيارة والرسوم البيانية", Icons.Filled.Assessment),
+                        Triple(ScreenRoute.DOCUMENTS, "الأوراق والتراخيص", Icons.Filled.Description),
+                        Triple(ScreenRoute.TIRES, "الإطارات وتجهيزات الطوارئ", Icons.Filled.TireRepair),
+                        Triple(ScreenRoute.EXPENSES, "المصروفات التفصيلية", Icons.Filled.ReceiptLong),
+                        Triple(ScreenRoute.FAULTS, "الأعطال والأعمال المطلوبة", Icons.Filled.Warning),
+                        Triple(ScreenRoute.PARTS, "قطع الغيار", Icons.Filled.Settings),
+                        Triple(ScreenRoute.ABOUT, "حول التطبيق والتواصل", Icons.Filled.Info)
+                    ).chunked(2).forEach { rowItems ->
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                            rowItems.forEach { (route, label, icon) ->
+                                OutlinedButton(
+                                    onClick = { onNavigate(route) },
+                                    modifier = Modifier.weight(1f),
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
+                                ) {
+                                    Icon(icon, contentDescription = null, tint = CrimsonAccent, modifier = Modifier.size(15.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text(label, fontSize = 11.sp, color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                            }
+                        }
+                    }
+                    if (!hasVehicle) {
+                        Text("ملاحظة: يجب إضافة سيارة لتفعيل تقارير وأقسام السيارة.", color = AlertYellow, fontSize = 11.sp)
+                    }
                 }
             }
-            Button(
-                onClick = {
-                    pendingJson?.let { onConfirmRestore(it, allowDup) }
-                    pendingJson = null
-                },
-                enabled = !pendingIsDup || allowDup,
-                colors = ButtonDefaults.buttonColors(containerColor = CrimsonAccent),
-                modifier = Modifier.fillMaxWidth()
-            ) { Text("تأكيد واستبدال البيانات الحالية") }
+        }
+
+        item {
+            Card(colors = CardDefaults.cardColors(containerColor = GraphiteSurface), border = BorderStroke(1.dp, SubtleBorder)) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("مظهر التطبيق (Theme)", fontWeight = FontWeight.Bold, color = TextPrimary, fontSize = 14.sp)
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                        FilterChip(
+                            selected = themeMode == "light",
+                            onClick = { onSelectThemeMode("light") },
+                            label = { Text("فاتح", fontSize = 11.sp) },
+                            modifier = Modifier.weight(1f)
+                        )
+                        FilterChip(
+                            selected = themeMode == "dark",
+                            onClick = { onSelectThemeMode("dark") },
+                            label = { Text("داكن", fontSize = 11.sp) },
+                            modifier = Modifier.weight(1f)
+                        )
+                        FilterChip(
+                            selected = themeMode == "system",
+                            onClick = { onSelectThemeMode("system") },
+                            label = { Text("الموبايل (${if (systemIsDark) "داكن" else "فاتح"})", fontSize = 10.sp) },
+                            modifier = Modifier.weight(1.3f)
+                        )
+                    }
+                }
+            }
+        }
+
+        item {
+            Card(colors = CardDefaults.cardColors(containerColor = GraphiteSurface), border = BorderStroke(1.dp, SubtleBorder)) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("العملة المحلية", fontWeight = FontWeight.Bold, color = TextPrimary, fontSize = 14.sp)
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+                        listOf("EGP" to "ج.م", "SAR" to "ر.س", "AED" to "د.إ", "USD" to "$").forEach { (c, s) ->
+                            FilterChip(
+                                selected = editCode == c && editSymbol == s,
+                                onClick = { editCode = c; editSymbol = s; onUpdateCurrency(c, s) },
+                                label = { Text("$s ($c)", fontSize = 10.sp) }
+                            )
+                        }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        OutlinedTextField(value = editCode, onValueChange = { editCode = it }, label = { Text("الرمز (EGP)") }, modifier = Modifier.weight(1f))
+                        OutlinedTextField(value = editSymbol, onValueChange = { editSymbol = it }, label = { Text("العلامة (ج.م)") }, modifier = Modifier.weight(1f))
+                    }
+                    OutlinedButton(
+                        onClick = { onUpdateCurrency(editCode, editSymbol) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("تطبيق العملة المخصصة", color = CrimsonAccent, fontWeight = FontWeight.Bold) }
+                }
+            }
+        }
+
+        item {
+            Card(colors = CardDefaults.cardColors(containerColor = GraphiteSurface), border = BorderStroke(1.dp, SubtleBorder)) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("النسخ الاحتياطي والاستعادة (SAF)", fontWeight = FontWeight.Bold, color = TextPrimary, fontSize = 14.sp)
+                    Text("النسخ الاحتياطي يدوي فقط لحماية بياناتك بصيغة JSON مشفّرة بالتدقيق.", color = TextSecondary, fontSize = 12.sp)
+                    Button(
+                        onClick = { createDoc.launch("MyCar-Backup-${LocalDate.now()}.json") },
+                        colors = ButtonDefaults.buttonColors(containerColor = CrimsonAccent),
+                        modifier = Modifier.fillMaxWidth().height(48.dp)
+                    ) { Text("إنشاء نسخة احتياطية") }
+                    OutlinedButton(
+                        onClick = { openDoc.launch(arrayOf("application/json")) },
+                        modifier = Modifier.fillMaxWidth().height(48.dp)
+                    ) { Text("فحص واستعادة نسخة احتياطية", color = TextPrimary) }
+                    previewMessage?.let { Text(it, color = AlertYellow, fontSize = 12.sp) }
+                    if (pendingJson != null) {
+                        if (pendingIsDup) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Checkbox(checked = allowDup, onCheckedChange = { allowDup = it })
+                                Text("نسخة مستعادة سابقًا — السماح بإعادة الاستعادة", color = AlertYellow, fontSize = 12.sp)
+                            }
+                        }
+                        Button(
+                            onClick = {
+                                pendingJson?.let { onConfirmRestore(it, allowDup) }
+                                pendingJson = null
+                            },
+                            enabled = !pendingIsDup || allowDup,
+                            colors = ButtonDefaults.buttonColors(containerColor = CrimsonAccent),
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text("تأكيد واستبدال البيانات الحالية") }
+                    }
+                }
+            }
         }
     }
 }
@@ -2168,6 +3336,7 @@ fun AboutScreen() {
 @Composable
 fun FaultsAndTasksScreen(
     bundle: VehicleBundle?,
+    currencySymbol: String = "ج.م",
     onAddTask: (String, String, Boolean) -> Unit,
     onCompleteTask: (PendingTaskEntity, String, Double, Double, String) -> Unit,
     onAddFault: (String, String, String, Double, Double, String) -> Unit
@@ -2233,7 +3402,7 @@ fun FaultsAndTasksScreen(
             Card(colors = CardDefaults.cardColors(containerColor = GraphiteSurface)) {
                 Column(modifier = Modifier.padding(12.dp)) {
                     Text("${fault.title} (${fault.status})", color = TextPrimary, fontWeight = FontWeight.Bold)
-                    Text("${fault.appearedAt} · ${UnitConverter.formatMoney(fault.totalCostPiastres)}", color = TextSecondary, fontSize = 12.sp)
+                    Text("${fault.appearedAt} · ${UnitConverter.formatMoney(fault.totalCostPiastres, currencySymbol)}", color = TextSecondary, fontSize = 12.sp)
                 }
             }
         }
@@ -2247,8 +3416,8 @@ fun FaultsAndTasksScreen(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(value = repairText, onValueChange = { repairText = it }, label = { Text("ما تم إصلاحه") })
-                    OutlinedTextField(value = partsCost, onValueChange = { partsCost = it }, label = { Text("تكلفة القطع") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
-                    OutlinedTextField(value = laborCost, onValueChange = { laborCost = it }, label = { Text("المصنعية") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+                    OutlinedTextField(value = partsCost, onValueChange = { partsCost = it }, label = { Text("تكلفة القطع ($currencySymbol)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+                    OutlinedTextField(value = laborCost, onValueChange = { laborCost = it }, label = { Text("المصنعية ($currencySymbol)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
                     OutlinedTextField(value = mech, onValueChange = { mech = it }, label = { Text("الميكانيكي (اختياري)") })
                 }
             },
@@ -2271,6 +3440,7 @@ fun FaultsAndTasksScreen(
 @Composable
 fun SparePartsScreen(
     bundle: VehicleBundle?,
+    currencySymbol: String = "ج.م",
     onAddPart: (String, String, Double, String, Boolean) -> Unit
 ) {
     if (bundle == null) return
@@ -2287,7 +3457,7 @@ fun SparePartsScreen(
                     Text("إضافة قطعة غيار", fontWeight = FontWeight.Bold, color = TextPrimary)
                     OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("اسم القطعة") }, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(value = brand, onValueChange = { brand = it }, label = { Text("الماركة") }, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(value = price, onValueChange = { price = it }, label = { Text("السعر") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(value = price, onValueChange = { price = it }, label = { Text("السعر ($currencySymbol)") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(value = vendor, onValueChange = { vendor = it }, label = { Text("المتجر / المركز (اختياري)") }, modifier = Modifier.fillMaxWidth())
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Checkbox(checked = includedInParent, onCheckedChange = { includedInParent = it })
@@ -2313,7 +3483,7 @@ fun SparePartsScreen(
                         Text("${part.partName} (${part.brand})", color = TextPrimary, fontWeight = FontWeight.Bold)
                         Text(part.installDate, color = TextSecondary, fontSize = 11.sp)
                     }
-                    Text(UnitConverter.formatMoney(part.pricePiastres), color = CrimsonAccent, fontWeight = FontWeight.Bold)
+                    Text(UnitConverter.formatMoney(part.pricePiastres, currencySymbol), color = CrimsonAccent, fontWeight = FontWeight.Bold)
                 }
             }
         }
@@ -2455,7 +3625,7 @@ fun DocumentsScreen(
     if (bundle == null) return
     val v = bundle.vehicle
     var renewingDoc by remember { mutableStateOf<DocumentRecordEntity?>(null) }
-    var newDate by remember { mutableStateOf("") }
+    var newDate by remember { mutableStateOf(LocalDate.now().plusYears(1).toString()) }
 
     LazyColumn(modifier = Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         if (v.ownershipType == "POWER_OF_ATTORNEY") {
@@ -2474,11 +3644,22 @@ fun DocumentsScreen(
                 "TECHNICAL_INSPECTION" -> "الفحص الفني"
                 else -> "رخصة القيادة"
             }
+            val prevDates = remember(doc.previousHistoryJson) {
+                try {
+                    val arr = org.json.JSONArray(doc.previousHistoryJson.ifBlank { "[]" })
+                    (0 until arr.length()).mapNotNull { idx -> arr.optString(idx).takeIf { it.isNotBlank() } }
+                } catch (_: Exception) {
+                    emptyList()
+                }
+            }
             Card(colors = CardDefaults.cardColors(containerColor = GraphiteSurface)) {
                 Row(modifier = Modifier.fillMaxWidth().padding(14.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(label, color = TextPrimary, fontWeight = FontWeight.Bold)
                         Text("الانتهاء: ${doc.expiryDate}", color = TextSecondary, fontSize = 12.sp)
+                        if (prevDates.isNotEmpty()) {
+                            Text("تواريخ سابقة: ${prevDates.joinToString("، ")}", color = TextSecondary, fontSize = 10.sp)
+                        }
                     }
                     Button(
                         onClick = { renewingDoc = doc; newDate = LocalDate.now().plusYears(1).toString() },
@@ -2495,7 +3676,7 @@ fun DocumentsScreen(
             containerColor = GraphiteSurface,
             title = { Text("تجديد الوثيقة", color = TextPrimary) },
             text = {
-                OutlinedTextField(value = newDate, onValueChange = { newDate = it }, label = { Text("تاريخ الانتهاء الجديد (YYYY-MM-DD)") })
+                DatePickerField(label = "تاريخ الانتهاء الجديد", dateIso = newDate, onDateSelected = { newDate = it })
             },
             confirmButton = {
                 Button(

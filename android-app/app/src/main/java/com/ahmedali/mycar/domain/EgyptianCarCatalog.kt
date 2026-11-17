@@ -1,10 +1,45 @@
 package com.ahmedali.mycar.domain
 
+import com.ahmedali.mycar.data.db.CustomCatalogEntity
+
 data class CatalogModel(val name: String, val years: List<Int>)
 data class CatalogBrand(val brand: String, val sourceNote: String, val models: List<CatalogModel>)
 
 object EgyptianCarCatalog {
     private fun years(start: Int, end: Int): List<Int> = (end downTo start).toList()
+
+    fun mergeWithCustom(custom: List<CustomCatalogEntity>): List<CatalogBrand> {
+        val merged = defaults.map { b ->
+            b.copy(models = b.models.map { m -> m.copy(years = m.years.toList()) })
+        }.toMutableList()
+
+        for (entry in custom) {
+            val brandIdx = merged.indexOfFirst { it.brand.equals(entry.brand.trim(), ignoreCase = true) }
+            if (brandIdx == -1) {
+                merged.add(
+                    CatalogBrand(
+                        brand = entry.brand.trim(),
+                        sourceNote = "إدخال مخصص محفوظ محليًا",
+                        models = listOf(CatalogModel(entry.model.trim(), listOf(entry.year)))
+                    )
+                )
+            } else {
+                val brandObj = merged[brandIdx]
+                val models = brandObj.models.toMutableList()
+                val modelIdx = models.indexOfFirst { it.name.equals(entry.model.trim(), ignoreCase = true) }
+                if (modelIdx == -1) {
+                    models.add(CatalogModel(entry.model.trim(), listOf(entry.year)))
+                } else {
+                    val mObj = models[modelIdx]
+                    if (entry.year !in mObj.years) {
+                        models[modelIdx] = mObj.copy(years = (mObj.years + entry.year).distinct().sortedDescending())
+                    }
+                }
+                merged[brandIdx] = brandObj.copy(models = models)
+            }
+        }
+        return merged
+    }
 
     val defaults: List<CatalogBrand> = listOf(
         CatalogBrand("Hyundai", "GB Auto & Egyptian Market", listOf(

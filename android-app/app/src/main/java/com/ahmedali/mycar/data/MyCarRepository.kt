@@ -45,6 +45,31 @@ class MyCarRepository(private val context: Context, private val db: MyCarDatabas
         dao.upsertSettings(current.copy(activeVehicleId = vehicleId, updatedAt = Instant.now().toString()))
     }
 
+    suspend fun updateCurrencySettings(code: String, symbol: String) {
+        val current = getSettings()
+        dao.upsertSettings(
+            current.copy(
+                currencyCode = code.trim().ifBlank { "EGP" },
+                currencySymbol = symbol.trim().ifBlank { "ج.م" },
+                updatedAt = Instant.now().toString()
+            )
+        )
+    }
+
+    suspend fun getCustomCatalog(): List<CustomCatalogEntity> = dao.getCustomCatalog()
+
+    suspend fun saveCustomCatalogEntry(brand: String, model: String, year: Int) {
+        dao.insertCustomCatalog(
+            CustomCatalogEntity(
+                id = "cat_${UUID.randomUUID()}",
+                brand = brand.trim(),
+                model = model.trim(),
+                year = year,
+                createdAt = Instant.now().toString()
+            )
+        )
+    }
+
     suspend fun getVehicleBundle(vehicleId: String): VehicleBundle? {
         val vehicle = dao.getVehicleById(vehicleId) ?: return null
         return VehicleBundle(
@@ -175,6 +200,44 @@ class MyCarRepository(private val context: Context, private val db: MyCarDatabas
         }
         recomputeAlerts(id)
         return vehicle
+    }
+
+    suspend fun updateVehicle(updated: VehicleEntity) {
+        val plate = EgyptianPlateValidator.validate(updated.plateRaw)
+        require(plate.valid) { plate.error ?: "رقم اللوحة غير صالح." }
+        val now = Instant.now().toString()
+        val finalVehicle = updated.copy(
+            brand = updated.brand.trim(),
+            model = updated.model.trim(),
+            plateRaw = updated.plateRaw.trim(),
+            plateNormalized = plate.normalized,
+            poaRegisteredContractDone = if (updated.ownershipType == "REGISTERED_CONTRACT") true else updated.poaRegisteredContractDone,
+            updatedAt = now
+        )
+        dao.upsertVehicle(finalVehicle)
+        recomputeAlerts(finalVehicle.id)
+    }
+
+    suspend fun archiveVehicle(vehicleId: String, archived: Boolean) {
+        val vehicle = dao.getVehicleById(vehicleId) ?: return
+        val now = Instant.now().toString()
+        dao.upsertVehicle(vehicle.copy(isArchived = archived, updatedAt = now))
+        val settings = getSettings()
+        if (archived && settings.activeVehicleId == vehicleId) {
+            val nextActive = dao.getAllVehicles().firstOrNull { !it.isArchived && it.id != vehicleId }?.id
+            setActiveVehicle(nextActive)
+        } else if (!archived && settings.activeVehicleId == null) {
+            setActiveVehicle(vehicleId)
+        }
+    }
+
+    suspend fun deleteVehiclePermanently(vehicleId: String) {
+        val settings = getSettings()
+        dao.deleteVehicleById(vehicleId)
+        if (settings.activeVehicleId == vehicleId) {
+            val nextActive = dao.getAllVehicles().firstOrNull { !it.isArchived }?.id
+            setActiveVehicle(nextActive)
+        }
     }
 
     suspend fun updateOdometerNormal(vehicleId: String, newReadingKm: Double) {
